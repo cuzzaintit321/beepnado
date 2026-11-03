@@ -124,12 +124,27 @@ function statusSettings(){
  $('status-form').addEventListener('submit',async e=>{e.preventDefault();const fd=new FormData(e.currentTarget);try{await api('/api/status-page',{method:'POST',body:JSON.stringify({title:fd.get('title'),slug:fd.get('slug')})});dash=await api('/api/dashboard');toast('Public status page saved');renderView();}catch(err){toast(err.message)}});
 }
 function billing(){
+ const canManageBilling=Boolean(user.stripe_customer && launchCapabilities?.billing);
+ const freeAction=user.plan==='free'
+   ? '<button class="btn btn-accent" type="button" data-view="monitors">Use Free plan ↗</button>'
+   : `<button class="btn btn-accent" type="button" data-bill-plan="free" ${canManageBilling?'':'disabled'}>${canManageBilling?'Manage downgrade ↗':'Downgrade unavailable'}</button>`;
  const list=[['free','Free','$0','2 monitors / 5-minute checks'],['pro','Pro','$12','20 monitors / 1-minute checks'],['team','Team','$39','100 monitors / 1-minute checks']];
- $('work-content').innerHTML=`<div class="panel"><h3>Your account</h3><p><strong>${esc(user.email)}</strong> · ${pill('up')} <span class="small-muted">Current plan: ${esc(user.plan.toUpperCase())}</span></p><p class="billing-note">Your plan controls the number of monitors and primary check interval. Paid billing opens only if Stripe prices and webhooks are configured. Payment cannot be activated by a browser redirect alone.</p></div><div class="pricing-grid section-spaced">${list.map(([id,label,price,description])=>`<div class="price-card"><div class="plan-tag">${esc(label.toUpperCase())}</div><div class="price">${price}<span>/mo</span></div><p>${esc(description)}</p><button class="btn ${id===user.plan?'btn-outline-dark':'btn-accent'}" data-bill-plan="${id}" ${id===user.plan || (id!=='free'&&!launchCapabilities?.billing)?'disabled':''}>${id===user.plan?'Current plan':id==='free'?'Free tier':launchCapabilities?.billing?'Subscribe ↗':'Planned tier'}</button></div>`).join('')}</div>${user.stripe_customer&&launchCapabilities?.billing?'<div class="panel section-spaced"><button class="work-btn" id="billing-portal">Manage billing in Stripe ↗</button></div>':''}<p class="billing-note">Manage an existing paid subscription in Stripe Billing.</p>`;
- $('billing-portal')?.addEventListener('click',async()=>{try{const data=await api('/api/billing/portal',{method:'POST'});location.href=data.url}catch(e){toast(e.message)}});
+ $('work-content').innerHTML=`<div class="panel"><h3>Your account</h3><p><strong>${esc(user.email)}</strong> · ${pill('up')} <span class="small-muted">Current plan: ${esc(user.plan.toUpperCase())}</span></p><p class="billing-note">Your plan controls the number of monitors and primary check interval. Paid billing opens only if Stripe prices and webhooks are configured. Payment cannot be activated by a browser redirect alone.</p></div><div class="pricing-grid section-spaced">${list.map(([id,label,price,description])=>`<div class="price-card"><div class="plan-tag">${esc(label.toUpperCase())}</div><div class="price">${price}<span>/mo</span></div><p>${esc(description)}</p>${id==='free'?freeAction:`<button class="btn ${id===user.plan?'btn-outline-dark':'btn-accent'}" data-bill-plan="${id}" ${id===user.plan || !launchCapabilities?.billing?'disabled':''}>${id===user.plan?'Current plan':launchCapabilities?.billing?'Subscribe ↗':'Planned tier'}</button>`}</div>`).join('')}</div>${canManageBilling?'<div class="panel section-spaced"><button class="work-btn" id="billing-portal">Manage billing in Stripe ↗</button></div>':''}<p class="billing-note">Manage an existing paid subscription in Stripe Billing.</p>`;
+ $('billing-portal')?.addEventListener('click',openBillingPortal);
+}
+async function openBillingPortal(){
+ try{
+   const data=await api('/api/billing/portal',{method:'POST'});
+   location.href=data.url;
+ }catch(e){toast(e.message)}
 }
 async function openCheckout(plan){
- if(plan==='free'){toast('Free is available to new accounts. Contact support to downgrade an active paid subscription.');return}
+ if(plan==='free'){
+   if(user.plan==='free')selectView('monitors');
+   else if(user.stripe_customer && launchCapabilities?.billing)await openBillingPortal();
+   else toast('The billing portal is unavailable for this account.');
+   return;
+ }
  if(!launchCapabilities?.billing){toast('Paid plans are not yet available.');return}
  try{const d=await api('/api/billing/checkout',{method:'POST',body:JSON.stringify({plan})});location.href=d.url}catch(e){toast(e.message)}
 }
