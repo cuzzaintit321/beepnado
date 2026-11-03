@@ -16,6 +16,27 @@ from urllib.error import URLError
 from urllib.request import urlopen
 
 
+# Send with the deployed application and report only allowlisted diagnostics.
+MAIL_TEST = r'''
+import json
+import smtplib
+import sys
+
+from app.main import send_email
+
+try:
+    send_email(sys.argv[1], 'BeepNado delivery test',
+               'This message verifies delivery from your BeepNado server.')
+except smtplib.SMTPRecipientsRefused as exc:
+    result = {'error': type(exc).__name__,
+              'code': next(iter(exc.recipients.values()))[0]}
+except (smtplib.SMTPException, OSError) as exc:
+    result = {'error': type(exc).__name__, 'code': getattr(exc, 'smtp_code', None)}
+else:
+    result = {'ok': True}
+print(json.dumps(result))
+'''
+
 APP = Path.home() / 'beepnado'
 ENV = APP / '.env'
 COMPOSE = ('docker', 'compose')
@@ -56,16 +77,17 @@ def wait_for_status(*, registration, email, billing):
     raise RuntimeError('BeepNado did not report the expected readiness and capabilities.')
 
 
-def write_env(contents):
-    with tempfile.NamedTemporaryFile(dir=APP, prefix='.signup-', delete=False) as tmp:
-        path = Path(tmp.name)
+def write_private(path, contents, mode=0o600):
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix='.signup-', delete=False) as tmp:
+        temporary = Path(tmp.name)
         try:
             tmp.write(contents)
             tmp.flush()
+            os.fchmod(tmp.fileno(), mode)
             os.fsync(tmp.fileno())
-            os.replace(path, ENV)
+            os.replace(temporary, path)
         finally:
-            path.unlink(missing_ok=True)
+            temporary.unlink(missing_ok=True)
 
 
 def update(original, settings):
@@ -76,14 +98,46 @@ def update(original, settings):
     for key, value in settings.items():
         escaped = value.replace("'", "\\'")
         lines.append(f"{key}='{escaped}'")
-    write_env(('\n'.join(lines) + '\n').encode())
+    write_private(ENV, ('\n'.join(lines) + '\n').encode())
     effective = json.loads(compose('config', '--format', 'json'))['services']['web']['environment']
     if any(effective.get(key) != value for key, value in settings.items()):
         raise RuntimeError('Compose did not read the intended settings.')
 
 
-def recreate():
-    compose('up', '-d', '--no-deps', '--force-recreate', 'web')
+def recreate(build=False):
+    options = ['up', '-d', '--no-deps', '--force-recreate']
+    if build:
+        options.append('--build')
+    compose(*options, 'web')
+
+
+def add_email_date_header(source):
+    if b"msg['Date'] = formatdate(usegmt=True)" in source:
+        return source
+    import_line = b'from email.message import EmailMessage\n'
+    subject_line = b"    msg['Subject']=subject\n"
+    if source.count(import_line) != 1 or source.count(subject_line) != 1:
+        raise RuntimeError('Installed mailer differs from the expected version. No changes applied.')
+    return source.replace(
+        import_line, import_line + b'from email.utils import formatdate\n',
+    ).replace(
+        subject_line, subject_line + b"    msg['Date'] = formatdate(usegmt=True)\n",
+    )
+
+
+def send_test_email(recipient):
+    result = json.loads(compose('exec', '-T', 'web', 'python', '-c', MAIL_TEST, recipient))
+    if result.get('ok'):
+        return
+    name = result.get('error', 'UnknownError')
+    code = result.get('code')
+    suffix = f', SMTP {code}' if isinstance(code, int) else ''
+    message = f'SMTP test failed ({name}{suffix}).'
+    if name == 'SMTPAuthenticationError':
+        message += ' Use the mailbox password. Check that the address can sign in to IONOS Webmail.'
+    elif name in ('TimeoutError', 'ConnectionRefusedError', 'SMTPConnectError', 'SMTPServerDisconnected'):
+        message += ' Retry once with the other SMTP port.'
+    raise RuntimeError(message)
 
 
 def stripe_audit():
@@ -136,34 +190,54 @@ def run():
     recipient = input('Your email address for the delivery test: ').strip()
     if not all(EMAIL.fullmatch(address) for address in (mailbox, recipient)):
         raise RuntimeError('Enter valid email addresses.')
+    port = input('IONOS SMTP port [465, or 587]: ').strip() or '465'
+    if port not in ('465', '587'):
+        raise RuntimeError('Use port 465 for SSL/TLS or 587 for STARTTLS.')
     password = getpass.getpass('IONOS mailbox password (hidden): ')
     if not password or any(char in password for char in ('\n', '\r', '\0', '\\')):
         raise RuntimeError('This setup requires a nonempty, single-line password without backslashes.')
 
     original = ENV.read_bytes()
+    source_path = APP / 'app' / 'main.py'
+    original_source = source_path.read_bytes()
+    patched_source = add_email_date_header(original_source)
+    source_changed = patched_source != original_source
+    source_mode = source_path.stat().st_mode & 0o777
     settings = {
         'SITE_URL': PUBLIC,
         'SESSION_SECURE': 'true',
         'REGISTRATION_ENABLED': 'false',
         'SMTP_HOST': 'smtp.ionos.com',
-        'SMTP_PORT': '587',
+        'SMTP_PORT': port,
         'SMTP_USER': mailbox,
         'SMTP_PASSWORD': password,
         'SMTP_FROM': mailbox,
-        'SMTP_SSL': 'false',
-        'SMTP_STARTTLS': 'true',
+        'SMTP_SSL': 'true' if port == '465' else 'false',
+        'SMTP_STARTTLS': 'true' if port == '587' else 'false',
     }
+    restarted = False
+    patched = False
+    stage = 'checking the Compose SMTP settings'
     try:
         update(original, settings)
-        recreate()
+        if source_changed:
+            stage = 'adding the Date header to the BeepNado mailer'
+            write_private(source_path, patched_source, source_mode)
+            patched = True
+        stage = 'starting BeepNado with signup closed'
+        print(f'{stage.capitalize()} (SMTP port {port})…', flush=True)
+        restarted = True
+        recreate(build=patched)
         wait_for_status(registration=False, email=True, billing=previous['billing'])
-        compose('exec', '-T', 'web', 'python', '-c',
-                "from app.main import send_email; import sys; "
-                "send_email(sys.argv[1], 'BeepNado delivery test', "
-                "'This message verifies delivery from your BeepNado server.')", recipient)
-        print('Check the destination inbox and spam folder.', flush=True)
+
+        stage = 'sending the SMTP test message from the BeepNado container'
+        print(f'{stage.capitalize()}…', flush=True)
+        send_test_email(recipient)
+        print('SMTP accepted the test. Check your inbox and spam folder.', flush=True)
         if input('Type received once the test email arrives: ').strip().lower() != 'received':
             raise RuntimeError('Delivery was not confirmed.')
+
+        stage = 'enabling and checking public signup'
         settings['REGISTRATION_ENABLED'] = 'true'
         update(original, settings)
         recreate()
@@ -173,16 +247,19 @@ def run():
             raise RuntimeError('The public HTTPS availability check did not match.')
     except (Exception, KeyboardInterrupt) as exc:
         try:
-            write_env(original)
-            recreate()
+            write_private(ENV, original)
+            if patched:
+                write_private(source_path, original_source, source_mode)
+            if restarted:
+                recreate(build=patched)
         except (Exception, KeyboardInterrupt):
-            print('Rollback could not restart BeepNado. Inspect Docker Compose on yeet.',
+            print('Rollback could not restore BeepNado. Inspect Docker Compose on yeet.',
                   file=sys.stderr)
         else:
             print('Previous BeepNado configuration restored.', file=sys.stderr)
-        if isinstance(exc, subprocess.SubprocessError):
-            raise RuntimeError('Docker or the SMTP delivery test failed. Check mailbox access.') from None
-        raise
+        if isinstance(exc, RuntimeError):
+            raise RuntimeError(f'{stage.capitalize()}: {exc}') from None
+        raise RuntimeError(f'Failed while {stage} ({type(exc).__name__}).') from None
     print('Public BeepNado capabilities:', json.dumps(live))
     print('Verify a fresh signup and password reset at https://app.beepnado.com/')
 
