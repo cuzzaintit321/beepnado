@@ -4,7 +4,8 @@ set -Eeuo pipefail
 release="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 app="$HOME/beepnado"
 state="$HOME/.local/state/beepnado"
-[[ -f "$app/compose.yaml" && -f "$app/.env" ]] || { echo 'BeepNado installation missing.' >&2; exit 1; }
+public_page="$HOME/portfolio/site/beepnado/index.html"
+[[ -f "$app/compose.yaml" && -f "$app/.env" && -f "$public_page" ]] || { echo 'BeepNado application or public homepage missing.' >&2; exit 1; }
 umask 077
 mkdir -p "$state"
 exec 9>"$app/.enable-signup.lock"
@@ -23,22 +24,23 @@ expect_release_file() {
     return 1
 }
 
-expect_release_file app/main.py 463d79e4917dab6a5874dc9a56081a997186bf3a486204f8a73475047bd62c3c 0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1 b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e 8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676
-expect_release_file app/static/monitor-view.js d7569b521cb79c9bea42afdfb0f043c97b8f0fdcdda7f76c53e65a8518af72b6 a2997738a91b875bccf9709ff7638e5ed510b9947bbc44a3f4aebd4e5a65deae 4a165fd2c214fa63496f7fa6721b5bd1a00ccb65de529c50d234ea23f5e8f00e 4fcefd3fddef0046279c0733450466b0377f5553d679eb9d9f57c5c7b588014f
+expect_release_file app/main.py 463d79e4917dab6a5874dc9a56081a997186bf3a486204f8a73475047bd62c3c 0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1 b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e 8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676 eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370
+expect_release_file app/static/monitor-view.js d7569b521cb79c9bea42afdfb0f043c97b8f0fdcdda7f76c53e65a8518af72b6 a2997738a91b875bccf9709ff7638e5ed510b9947bbc44a3f4aebd4e5a65deae 4a165fd2c214fa63496f7fa6721b5bd1a00ccb65de529c50d234ea23f5e8f00e 4fcefd3fddef0046279c0733450466b0377f5553d679eb9d9f57c5c7b588014f 97deadce2c8cb6be49432d8f77d803b9ba98a7b1736e99505c28b8ac0818c5f5
 expect_release_file requirements.txt c7b3d34378d337125cc58d87dd542b70322cffac63339196e5c23cdfeb9c9cef ab59b5f98e5e75669346e0f877691470741461658fdaee164162ac885ebc8be4
 
 staged_main="$state/release/app/main.py"
 if [[ -f "$staged_main" ]] && ! cmp -s "$staged_main" "$release/app/main.py"; then
     read -r staged_digest _ < <(sha256sum -- "$staged_main")
     case "$staged_digest" in
-        0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1|b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e|8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676) ;;
+        0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1|b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e|8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676|eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370) ;;
         *) echo 'Existing paid release was modified. Review before updating.' >&2; exit 1 ;;
     esac
 fi
 
 backup="$(mktemp -d "$state/monitoring-backup.XXXXXXXX")"
-files=(app/main.py app/static/app.js app/static/monitor-view.js app/static/monitor-theme.css requirements.txt)
+files=(app/main.py app/static/index.html app/static/app.js app/static/monitor-view.js app/static/monitor-theme.css requirements.txt)
 cp -p --parents -- "${files[@]}" "$backup"
+cp -p -- "$public_page" "$backup/public-before.html"
 # Patch only the status rendering in app.js, preserving locally deployed billing and signup behavior.
 patch_file="$backup/public-status.patch"
 cat >"$patch_file" <<'PUBLIC_STATUS_PATCH'
@@ -84,11 +86,22 @@ cat >"$patch_file" <<'PUBLIC_STATUS_PATCH'
 + }
   try{launchCapabilities=await api('/api/availability')}catch(e){console.warn('Launch status unavailable')}
 PUBLIC_STATUS_PATCH
-patch_app=false
-if ! git apply --reverse --check "$patch_file" 2>/dev/null; then
-    git apply --check "$patch_file" || { echo 'Local status-page changes require review.' >&2; exit 1; }
-    patch_app=true
-fi
+# Prepare both page changes before replacing any deployed file.
+ui="$backup/ui"
+mkdir -p "$ui"
+cp -p --parents -- app/static/app.js app/static/index.html "$ui"
+auth_patch="$release/scripts/app_workspace.patch"
+(
+    cd "$ui"
+    if ! git apply --reverse --check "$auth_patch" 2>/dev/null; then
+        if ! git apply --check "$auth_patch" 2>/dev/null; then
+            git apply "$patch_file"
+        fi
+        git apply "$auth_patch"
+    fi
+)
+python3 "$release/scripts/stage_entry_pages.py" "$release" "$ui/app/static/index.html" \
+    "$backup/public-before.html" "$backup/public-after.html"
 if [[ -f "$staged_main" ]]; then
     cp -p -- "$staged_main" "$backup/staged-main.py"
 fi
@@ -113,21 +126,36 @@ with tempfile.TemporaryDirectory() as tmp:
         shutil.copyfileobj(data, sys.stdout.buffer)
 ' >"$backup/before-monitoring.sqlite3"
 
+publish_public() {
+    local temporary
+    temporary="$(mktemp "$(dirname -- "$public_page")/.beepnado.XXXXXXXX")"
+    cp -p -- "$1" "$temporary"
+    mv -f -- "$temporary" "$public_page"
+}
+
 rollback() {
     trap - ERR INT TERM
     echo "Restore from $backup" >&2
     for file in "${files[@]}"; do cp -p -- "$backup/$file" "$file"; done
+    if ! cmp -s "$backup/public-before.html" "$public_page"; then
+        publish_public "$backup/public-before.html"
+    fi
     if [[ -f "$backup/staged-main.py" ]]; then cp -p -- "$backup/staged-main.py" "$staged_main"; fi
     docker compose up -d --no-deps --build web || true
     exit 1
 }
 trap rollback ERR INT TERM
-if [[ "$patch_app" == true ]]; then git apply "$patch_file"; fi
+cp -- "$ui/app/static/app.js" app/static/app.js
+cp -- "$ui/app/static/index.html" app/static/index.html
+if ! cmp -s "$backup/public-after.html" "$public_page"; then
+    chmod --reference="$backup/public-before.html" "$backup/public-after.html"
+    publish_public "$backup/public-after.html"
+fi
 cp -- "$release/app/main.py" app/main.py
 cp -- "$release/app/static/monitor-view.js" app/static/monitor-view.js
 cp -- "$release/requirements.txt" requirements.txt
 # Preserve local styling by appending each missing section.
-for marker in '/* Configurable check rules */' '/* Heartbeat monitors */' '/* Planned maintenance */'; do
+for marker in '/* Configurable check rules */' '/* Heartbeat monitors */' '/* Planned maintenance */' '/* Public probe evidence */' '/* Workspace entry */'; do
     if ! grep -Fxq "$marker" app/static/monitor-theme.css; then
         printf '\n' >> app/static/monitor-theme.css
         awk -v marker="$marker" '
@@ -140,6 +168,10 @@ for marker in '/* Configurable check rules */' '/* Heartbeat monitors */' '/* Pl
 done
 docker compose up -d --build --no-deps --wait --wait-timeout 90 web
 caddy /health/ready >/dev/null
+caddy / >"$backup/served-workspace.html"
+cmp app/static/index.html "$backup/served-workspace.html"
+curl -fsS --max-time 12 --resolve beepnado.com:443:127.0.0.1 https://beepnado.com/ >"$backup/served-public.html"
+cmp "$public_page" "$backup/served-public.html"
 status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 12 --resolve app.beepnado.com:443:127.0.0.1 -X POST https://app.beepnado.com/api/heartbeat)"
 [[ "$status" == 401 ]]
 caddy /static/app.js >"$backup/served-app.js"
@@ -160,5 +192,5 @@ if [[ -f "$staged_main" ]]; then
     cp -- "$release/app/main.py" "$staged_main"
 fi
 trap - ERR INT TERM
-echo 'Maintenance windows, heartbeat monitors, and check rules deployed and verified through Caddy.'
+echo 'Marketing homepage, workspace entry, and monitoring upgrades deployed and verified through Caddy.'
 echo "Backup: $backup"

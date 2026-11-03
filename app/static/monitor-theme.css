@@ -207,3 +207,13 @@
 .bn-maintenance-text,.bn-monitor-meta small.bn-maintenance-text{color:#f2c680}
 .bn-state-dot.bn-maintenance{background:#f2c680}
 .bn-tick.bn-planned-tick{box-shadow:inset 0 -4px #f2c680}
+
+/* Public probe evidence */
+.bn-monitor-meta .bn-public-ok{color:#8ae5c5}
+.bn-monitor-meta .bn-public-warning{color:#f2c680}
+.bn-tick.bn-public-tick{box-shadow:inset 0 -4px #9fa6f6}
+.bn-public-evidence{display:grid;gap:8px;color:#c4d3e3;padding-left:1.2rem;overflow-wrap:anywhere}
+
+/* Workspace entry */
+.app-loading{display:grid;min-height:100vh;place-content:center;margin:0;background:#101827;color:#e7edf7;font-weight:700}
+.app-loading.hidden{display:none}

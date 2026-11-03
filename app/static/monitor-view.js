@@ -21,13 +21,31 @@
     };
   }
 
+  const localRegions = new Set(['primary', 'maintenance', 'heartbeat']);
+  const isExternal = check => !localRegions.has(check.region);
+
+  function externalSummary(monitor) {
+    const observations = monitor.regional_checks || [];
+    const fresh = observations.filter(check => !check.stale);
+    if (!fresh.length) {
+      const label = observations.length ? 'Public check stale' : 'No recent public check';
+      return `<small class="bn-public-check bn-public-stale">${label}</small>`;
+    }
+    const failures = fresh.filter(check => check.state === 'down').length;
+    const label = failures === 0 ? 'Public check passed' : failures === fresh.length
+      ? 'Public check failed' : 'Public checks disagree';
+    const title = fresh.map(check => check.region + ' · ' + fmt(check.checked_at)).join(' / ');
+    return `<small class="bn-public-check bn-public-${failures ? 'warning' : 'ok'}" title="${tidy(title)}">${label}</small>`;
+  }
+
   function recentBars(m) {
     const checks = getChecks().filter(c => Number(c.monitor_id) === Number(m.id)).slice(0, 24).reverse();
     const gaps = Math.max(0, 24 - checks.length);
     const maintenance = checks.filter(c => c.region === 'maintenance').length;
+    const external = checks.filter(isExternal).length;
     const bars = '<span class="bn-tick bn-empty" aria-hidden="true"></span>'.repeat(gaps) +
-      checks.map(c => `<span class="bn-tick bn-${['up','down','degraded'].includes(c.state) ? c.state : 'empty'}${c.region === 'maintenance' ? ' bn-planned-tick' : ''}" title="${tidy(fmt(c.checked_at))}: ${tidy(prettyState(c.state))}${c.region === 'maintenance' ? ' · planned maintenance' : ''}" aria-hidden="true"></span>`).join('');
-    return `<div class="bn-history"><div class="bn-history-bars" role="img" aria-label="${checks.length} recent recorded checks for ${tidy(m.name)}${maintenance ? ', ' + maintenance + ' during maintenance' : ''}">${bars}</div><span class="bn-history-caption">${checks.length ? checks.length + ' recent checks' : 'No checks yet'}${maintenance ? ' · ' + maintenance + ' planned' : ''}</span></div>`;
+      checks.map(c => `<span class="bn-tick bn-${['up','down','degraded'].includes(c.state) ? c.state : 'empty'}${c.region === 'maintenance' ? ' bn-planned-tick' : isExternal(c) ? ' bn-public-tick' : ''}" title="${tidy(fmt(c.checked_at))}: ${tidy(prettyState(c.state))}${c.region === 'maintenance' ? ' · planned maintenance' : isExternal(c) ? ' · public ' + tidy(c.region) : ''}" aria-hidden="true"></span>`).join('');
+    return `<div class="bn-history"><div class="bn-history-bars" role="img" aria-label="${checks.length} recent recorded checks for ${tidy(m.name)}${maintenance ? ', ' + maintenance + ' during maintenance' : ''}${external ? ', ' + external + ' public' : ''}">${bars}</div><span class="bn-history-caption">${checks.length ? checks.length + ' recent checks' : 'No checks yet'}${maintenance ? ' · ' + maintenance + ' planned' : ''}${external ? ' · ' + external + ' public' : ''}</span></div>`;
   }
 
   function monitorItem(m) {
@@ -40,14 +58,15 @@
     const timing = heartbeat
       ? (m.heartbeat_last_at == null ? 'Awaiting first ping' : 'Last ping ' + fmt(new Date(m.heartbeat_last_at * 1000).toISOString()))
       : (m.maintenance_last_checked ? 'Maintenance check ' + fmt(m.maintenance_last_checked)
-         : m.last_checked ? 'Checked ' + fmt(m.last_checked) : 'Awaiting first check');
+         : m.last_checked ? 'Primary check ' + fmt(m.last_checked) : 'Awaiting first check');
     const pct = m.samples_30d ? `${num(m.success_rate_30d).toFixed(2)}%` : '—';
     const rules = [m.required_phrase && 'Required phrase', m.expected_status && 'HTTP ' + m.expected_status,
       m.max_response_ms && '≤ ' + m.max_response_ms + ' ms'].filter(Boolean).join(' · ');
     return `<article class="bn-monitor-row" aria-label="${tidy(m.name)}: ${tidy(prettyState(state))}">
       <div class="bn-monitor-identity"><span class="bn-state-dot bn-${tidy(state)}" aria-hidden="true"></span>
         <div class="bn-monitor-title"><strong>${tidy(m.name)}</strong><span class="bn-host" title="${tidy(target)}">${tidy(target)}</span>${rules ? '<span class="bn-host">' + tidy(rules) + '</span>' : ''}</div></div>
-      <div class="bn-monitor-meta"><span>${pill(state)}</span><small>${tidy(timing)}</small>${notice ? '<small class="bn-maintenance-text">' + tidy(notice) + '</small>' : ''}</div>
+      <div class="bn-monitor-meta"><span>${pill(state)}</span><small>${tidy(timing)}</small>${notice ? '<small class="bn-maintenance-text">' + tidy(notice) + '</small>' : ''}
+        ${heartbeat ? '' : externalSummary(m)}</div>
       ${recentBars(m)}
       <div class="bn-monitor-metrics">${heartbeat
         ? '<strong>' + num(m.heartbeat_grace_s) / 60 + ' min</strong><small>Grace period</small>'
@@ -95,7 +114,12 @@
     let safeUrl=heartbeat?'Heartbeat':String(m.url||'').split('?')[0];
     try { const u=new URL(m.url); safeUrl=u.origin+u.pathname; } catch(e){}
     const observed=latest?(latest.checked_at||m.last_checked):null;
-    const lines=checks.map(c=>fmt(c.checked_at)+' | '+prettyState(c.state)+(heartbeat?'':' | HTTP '+(c.http_code??'—')+' | '+(c.response_ms??'—')+'ms'));
+    const lines=checks.map(c=>fmt(c.checked_at)+' | '+c.region+' | '+prettyState(c.state)+(heartbeat?'':' | HTTP '+(c.http_code??'—')+' | '+(c.response_ms??'—')+'ms'));
+    const external = (m.regional_checks || []).map(c => {
+      const result = c.state === 'up' ? 'Passed' : 'Failed';
+      const evidence = c.error ? String(c.error).replace(/[\r\n]/g, ' ') : 'HTTP ' + (c.http_code ?? '—');
+      return c.region + ' · ' + result + (c.stale ? ' (stale)' : '') + ' · ' + fmt(c.checked_at) + ' · ' + evidence;
+    });
     copyableReport=[
       'BEEPNADO INCIDENT INVESTIGATOR · Evidence-based report',
       'Monitor: '+m.name+' · '+safeUrl,
@@ -105,15 +129,19 @@
       'Observed evidence: '+hint[1],
       'Suggested next step: '+hint[2],
       'Recorded error: '+String(latest?.error||'None').replace(/[\r\n]/g,' ').slice(0,120),
+      ...(heartbeat ? [] : ['Public probes:', ...(external.length ? external : ['No recent public observation.'])]),
       'Recent checks:',...(lines.length?lines:['No observations recorded.']),
       'Interpretation is not a confirmed root cause. Same-host checks cannot detect whole-server or Internet outages.'
     ].join('\n');
     const history=checks.length?checks.map(c=>
-      '<div class="bn-investigation-row"><span>'+tidy(fmt(c.checked_at))+'</span><span>'+tidy(prettyState(c.state))+(c.region==='maintenance'?' · planned':'')+'</span>'+(heartbeat?'':'<span>HTTP '+tidy(c.http_code??'—')+'</span><span>'+tidy(c.response_ms==null?'—':c.response_ms+' ms')+'</span>')+'</div>').join(''):'<p>No check history yet.</p>';
+      '<div class="bn-investigation-row"><span>'+tidy(fmt(c.checked_at))+'</span><span>'+tidy(prettyState(c.state))+(c.region==='maintenance'?' · planned':isExternal(c)?' · '+tidy(c.region):'')+'</span>'+(heartbeat?'':'<span>HTTP '+tidy(c.http_code??'—')+'</span><span>'+tidy(c.response_ms==null?'—':c.response_ms+' ms')+'</span>')+'</div>').join(''):'<p>No check history yet.</p>';
     investigatorDialog.innerHTML=
       '<div class="bn-investigator-top"><span>REAL CHECK EVIDENCE · BEEPNADO</span><button type="button" data-investigator-close aria-label="Close">×</button></div>'+
       '<h2>Incident Investigator</h2><p>'+tidy(m.name)+' · '+tidy(safeUrl)+'</p>'+
       '<div class="bn-investigator-cause"><small>POSSIBLE ISSUE — NOT A CONFIRMED ROOT CAUSE</small><h3>'+tidy(hint[0])+'</h3><p>'+tidy(hint[1])+'</p><strong>What to check next</strong><p>'+tidy(hint[2])+'</p></div>'+
+      (heartbeat ? '' : '<h3>Public probes</h3>' + (external.length
+        ? '<ul class="bn-public-evidence">' + external.map(line => '<li>' + tidy(line) + '</li>').join('') + '</ul>'
+        : '<p>No recent public observation.</p>')) +
       '<h3>Recent recorded checks</h3><div class="bn-investigator-history">'+history+'</div>'+
       '<p class="bn-investigator-note">Based only on recorded observations; no simulated data. If monitoring from the same server, a total server or network outage will not be detected independently.</p>'+
       '<div class="bn-investigator-actions"><button type="button" class="bn-btn bn-btn-primary" data-investigator-copy>Copy client report</button><button type="button" class="bn-btn bn-btn-quiet" data-investigator-close>Close</button></div>';

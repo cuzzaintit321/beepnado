@@ -26,6 +26,21 @@ bash ~/beepnado-launch/scripts/deploy_public_investigator.sh
 
 The second script updates only the public BeepNado marketing HTML and stylesheet, taking backups. Neither script configures live Stripe payments. Monitoring on the same server still cannot independently detect host-wide or Internet outages.
 
+## Public monitoring from a second network
+
+Deploy the worker on a separate network so it can check public DNS, TLS, and HTTP even if the main BeepNado server is offline. On that host, copy `.worker.env.example` to `.worker.env` with mode 600. Set `WORKER_WATCH_URLS` to the HTTPS URLs you operate, then start the worker:
+
+```bash
+install -m 600 .worker.env.example .worker.env
+# Edit .worker.env before starting the worker.
+docker compose -f compose.worker.yaml up -d --build
+docker compose -f compose.worker.yaml logs --tail=30 worker
+```
+
+With `WORKER_ALERT_EMAIL` and TLS SMTP configured on the worker, two consecutive failed public checks queue one outage email. A successful check after a confirmed outage queues one recovery email. The worker stores alert state and retries in its own volume. These operator alerts run independently of dashboard maintenance windows.
+
+To see public observations beside primary checks, set `BEEPNADO_URL` and a random `WORKER_TOKEN` in `.worker.env`. Set the same token on the main server and recreate its web container. The token grants access to active website target URLs, so give it only to a trusted worker. The public probes measure ordinary HTTP(S) availability. Your primary check rules and incident state are tracked separately. The dashboard marks public samples over 15 minutes old as stale and displays observations from the past hour.
+
 ## Planned maintenance
 
 Open **Maintenance** on a website monitor to start a window now or schedule one in your local time. The checks keep running at the usual interval, and the dashboard marks those results in the check history. During the window BeepNado suppresses outage and recovery alerts for that monitor and excludes the planned checks from its success rate. A public status page shows the upcoming or active window. End it early from the same dialog to resume normal alerting at the next check.

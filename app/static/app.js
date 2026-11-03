@@ -1,12 +1,20 @@
 /* BeepNado UI: customer data and incident alerts come from the real API. */
 const $ = id => document.getElementById(id);
 const esc = value => String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let signedIn=false, user=null, view='overview', mode='register', dash=null, selectedPlan=null, resetToken=null, launchCapabilities=null;
+let signedIn=false, user=null, view='overview', mode='login', dash=null, resetToken=null, launchCapabilities=null;
 const fmt = value => value ? new Date(value).toLocaleString() : 'Not checked';
 const dateOnly = value => value ? new Date(value).toLocaleDateString() : '—';
 const prettyState = s => s==='up'?'Operational':s==='down'?'Down':s==='degraded'?'Unconfirmed failure':s==='maintenance'?'Maintenance':'Awaiting check';
 const pill = state => `<span class="status-pill status-${esc(state)}">● ${prettyState(state)}</span>`;
-const toast = (text) => {const e=$('toast');e.textContent=text;e.classList.add('show');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),4500)};
+function toast(text){
+ const loading=$('app-loading');
+ if(!loading.classList.contains('hidden')) loading.textContent=text;
+ const message=$('toast');
+ message.textContent=text;
+ message.classList.add('show');
+ clearTimeout(message._t);
+ message._t=setTimeout(()=>message.classList.remove('show'),4500);
+}
 async function api(path, opts={}){
   let headers={'Accept':'application/json',...(opts.body?{'Content-Type':'application/json'}:{}),...(opts.headers||{})};
   if(user?.csrf && opts.method && opts.method.toUpperCase()!=='GET')headers['X-CSRF-Token']=user.csrf;
@@ -16,33 +24,11 @@ async function api(path, opts={}){
   return data;
 }
 function show(which){
- $('public-home').classList.toggle('hidden',which!=='home');
+ $('app-loading').classList.add('hidden');
  $('account-screen').classList.toggle('hidden',which!=='auth');
  $('workspace').classList.toggle('hidden',which!=='workspace');
  $('public-status').classList.toggle('hidden',which!=='status');
- document.querySelector('.nav').classList.toggle('hidden',!['home','auth'].includes(which));
- $('site-footer').classList.toggle('hidden',which!=='home');
  window.scrollTo(0,0);
-}
-const signupButtons = ['nav-getstarted','hero-getstarted','how-start','closing-start','investigator-start'];
-function updateLaunchAvailability(){
- const signup = launchCapabilities?.free_registration === true;
- const billing = launchCapabilities?.billing === true;
- for(const id of signupButtons){
-   const button=$(id);
-   if(button){button.disabled=!signup;button.textContent=signup?'Start free ↗':'Signup closed'}
- }
- document.querySelectorAll('[data-plan]').forEach(button=>{
-   const free=button.dataset.plan==='free';
-   button.disabled=free?!signup:!billing;
-   button.textContent=free?(signup?'Start free ↗':'Signup closed'):
-      (billing?(button.dataset.plan==='pro'?'Choose Pro ↗':'Choose Team ↗'):'Checkout unavailable');
- });
- const status=$('pricing-availability');
- if(status)status.textContent=launchCapabilities
-   ? [signup?'Free signup is open.':'Free signup is currently closed.',
-      billing?'Paid checkout is available.':'Paid checkout is currently unavailable.'].join(' ')
-   : 'Availability could not be checked. Refresh to try again.';
 }
 function openAuth(which='register'){
  const registrationClosed=which==='register' && launchCapabilities?.free_registration!==true;
@@ -81,7 +67,8 @@ async function loadDashboard(){
  if(!signedIn){openAuth('login');return}
  dash=await api('/api/dashboard');
  try{launchCapabilities=await api('/api/availability')}catch(e){launchCapabilities=null}
- if(!dash.monitors.length) view='monitors';
+ if(location.hash==='#pricing' || new URLSearchParams(location.search).has('billing')) view='billing';
+ else if(!dash.monitors.length) view='monitors';
  $('user-chip').textContent=user.email+' · '+user.plan.toUpperCase();
  show('workspace');renderView();
 }
@@ -179,11 +166,6 @@ async function init(){
  }
  try{launchCapabilities=await api('/api/availability')}catch(e){console.warn('Launch status unavailable')}
  try{await refreshUser()}catch(e){console.warn('Authentication status unavailable')}
- const start=async(which='register')=>{if(signedIn){await loadDashboard()}else openAuth(which)};
- updateLaunchAvailability();
- signupButtons.forEach(id=>$(id)?.addEventListener('click',()=>start('register')));
- $('nav-signin')?.addEventListener('click',()=>start('login'));
- $('account-back')?.addEventListener('click',()=>show('home'));
  $('account-swap')?.addEventListener('click',()=>openAuth(mode==='login'?'register':'login'));
  $('account-forgot')?.addEventListener('click',()=>openAuth('forgot'));
  $('account-resend')?.addEventListener('click',async()=>{
@@ -194,8 +176,6 @@ async function init(){
        $('account-success').textContent=data.message||'Check your inbox.'}
    catch(err){$('account-error').textContent=err.message}
  });
- $('mobile-nav')?.addEventListener('click',()=>document.querySelector('.nav-menu').classList.toggle('open'));
- document.querySelectorAll('[data-plan]').forEach(b=>b.addEventListener('click',async()=>{selectedPlan=b.dataset.plan;await start('register');if(signedIn)openCheckout(selectedPlan)}));
  $('account-form').addEventListener('submit',async e=>{
    e.preventDefault(); $('account-error').textContent='';
    try{
@@ -203,12 +183,10 @@ async function init(){
      if(mode==='register'){
        const data=await api('/api/register',{method:'POST',body:JSON.stringify({email,password})});
        $('account-success').textContent=data.message||'Check your inbox for a verification link.';
-       $('account-form').reset();selectedPlan=null;
+       $('account-form').reset();
      }else if(mode==='login'){
        await api('/api/login',{method:'POST',body:JSON.stringify({email,password})});
        await loadDashboard();
-       if(selectedPlan&&selectedPlan!=='free')await openCheckout(selectedPlan);
-       selectedPlan=null;
      }else if(mode==='forgot'){
        const data=await api('/api/request-password-reset',{method:'POST',body:JSON.stringify({email})});
        $('account-success').textContent=data.message;
@@ -221,7 +199,20 @@ async function init(){
    }catch(err){$('account-error').textContent=err.message}
  });
  document.querySelectorAll('.side-link').forEach(e=>e.addEventListener('click',()=>selectView(e.dataset.view)));
- $('signout')?.addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});user=null;signedIn=false;dash=null;try{launchCapabilities=await api('/api/availability')}catch(e){launchCapabilities=null}updateLaunchAvailability();show('home');toast('Signed out')}catch(e){toast(e.message)}});
+ $('signout')?.addEventListener('click',async()=>{
+   try {
+     await api('/api/logout',{method:'POST'});
+     user=null;
+     signedIn=false;
+     dash=null;
+     view='overview';
+     try { launchCapabilities=await api('/api/availability'); }
+     catch { launchCapabilities=null; }
+     $('account-form').reset();
+     openAuth('login');
+     toast('Signed out');
+   } catch (error) { toast(error.message); }
+ });
  $('work-content').addEventListener('click',async e=>{
    const b=e.target.closest('button');if(!b)return;
    if(b.dataset.view){selectView(b.dataset.view);return}
@@ -239,10 +230,12 @@ async function init(){
    resetToken=hash.slice(7);
    history.replaceState(null,'',location.pathname+location.search);
    openAuth('reset');
- }else if(location.search.includes('signin'))openAuth('login');
- else if(new URLSearchParams(location.search).has('signup') || new URLSearchParams(location.search).has('start'))await start('register');
- else if(signedIn){await loadDashboard();if(hash==='#pricing')selectView('billing')}
- else {show('home');if(hash==='#pricing')$('pricing')?.scrollIntoView()}
+ }else if(signedIn){
+   await loadDashboard();
+ }else {
+   const query = new URLSearchParams(location.search);
+   openAuth(query.has('signup') || query.has('start') ? 'register' : 'login');
+ }
 }
 // Refresh read-only monitoring views automatically while the workspace is open.
 setInterval(async()=>{

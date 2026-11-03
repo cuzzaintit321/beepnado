@@ -139,6 +139,8 @@ def init_db():
           http_code INTEGER, response_ms INTEGER, cert_days INTEGER, error TEXT
         );
         CREATE INDEX IF NOT EXISTS checks_history ON checks(monitor_id,id DESC);
+        CREATE INDEX IF NOT EXISTS checks_external_recent ON checks(monitor_id,checked_at)
+          WHERE region NOT IN ('primary','maintenance','heartbeat');
         CREATE TABLE IF NOT EXISTS maintenance_windows(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
@@ -413,13 +415,13 @@ async def check_required_phrase(reader, connection, response, phrase):
     return 'Required phrase not found in the first 256 KiB of response content'
 
 
-async def probe(url, *, required_phrase='', expected_status=None, max_response_ms=None):
+async def probe(url, *, required_phrase='', expected_status=None, max_response_ms=None, public_only=False):
     # DNS-pinned HTTP(S) probe with optional status, latency and content checks.
     started = time.monotonic()
     writer = None
     try:
         host, ip, port, path, scheme = await validate_url(url)
-        target = probe_connection_target(host, ip)
+        target = ip if public_only else probe_connection_target(host, ip)
         context = ssl.create_default_context() if scheme == 'https' else None
         reader, writer = await asyncio.wait_for(asyncio.open_connection(
             target, port, ssl=context, server_hostname=host if context else None), timeout=8)
@@ -867,8 +869,27 @@ def dashboard(user=Depends(require_user)):
              GROUP BY ch.monitor_id''',(user['id'],cutoff))}
         clock = now()
         windows = scheduled_maintenance(c, user['id'], clock)
+        regional = {}
+        timestamp = datetime.fromisoformat(clock)
+        hour_ago = (timestamp - timedelta(hours=1)).isoformat(timespec='seconds')
+        fresh_since = (timestamp - timedelta(minutes=15)).isoformat(timespec='seconds')
+        for row in c.execute('''
+            SELECT ch.monitor_id,ch.region,ch.checked_at,ch.state,ch.http_code,ch.response_ms,ch.error
+            FROM checks ch JOIN (
+                SELECT recent.monitor_id,recent.region,MAX(recent.id) AS id
+                FROM monitors m JOIN checks recent ON recent.monitor_id=m.id
+                WHERE m.user_id=? AND recent.checked_at>=?
+                  AND recent.region NOT IN ('primary','maintenance','heartbeat')
+                GROUP BY recent.monitor_id,recent.region
+            ) latest ON latest.id=ch.id
+            ORDER BY ch.checked_at DESC, ch.region
+        ''', (user['id'], hour_ago)):
+            observation = dict(row)
+            observation['stale'] = row['checked_at'] < fresh_since
+            regional.setdefault(row['monitor_id'], []).append(observation)
         for mon in monitors:
             mon['maintenance'] = windows.get(mon['id'])
+            mon['regional_checks'] = regional.get(mon['id'], [])
             mon['display_state'] = displayed_state(mon, mon['maintenance'], clock)
             mon.pop('heartbeat_token_hash')
             mon['kind'] = 'heartbeat' if mon['heartbeat_interval_s'] is not None else 'http'
@@ -1342,9 +1363,13 @@ def remote_result(item:WorkerResult,request:Request):
     if not WORKER_TOKEN or len(WORKER_TOKEN)<32 or not hmac.compare_digest(request.headers.get('x-worker-token',''),WORKER_TOKEN):
         raise HTTPException(401,'Worker not authorized')
     if item.state not in ('up','down') or item.region in ('primary', 'maintenance', 'heartbeat'):raise HTTPException(422,'Invalid result')
-    # Regional measurements are stored separately; they cannot create/close primary incidents.
+    # Keep the external observation separate from primary incident state.
     with db() as c:
-        if not c.execute('SELECT 1 ' + ACTIVE_MONITORS + ' AND m.id=? AND m.heartbeat_interval_s IS NULL',(item.monitor_id,)).fetchone():raise HTTPException(404)
-        c.execute('INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error) VALUES(?,?,?,?,?,?,?,?)',
-                  (item.monitor_id,item.region,now(),item.state,item.http_code,item.response_ms,item.cert_days,(item.error or '')[:100]))
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 ' + ACTIVE_MONITORS + ' AND m.id=? AND m.heartbeat_interval_s IS NULL',
+                         (item.monitor_id,)).fetchone():
+            raise HTTPException(404)
+        result = item.model_dump()
+        result['error'] = (item.error or '')[:100]
+        store_check(c, item.monitor_id, item.region, now(), item.state, result)
     return {'ok':True}

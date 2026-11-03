@@ -1,0 +1,14 @@
+name: beepnado-outside
+services:
+  worker:
+    build: .
+    command: ["python", "-m", "app.worker"]
+    env_file: .worker.env
+    init: true
+    restart: unless-stopped
+    volumes:
+      - worker-state:/data
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+volumes:
+  worker-state:
