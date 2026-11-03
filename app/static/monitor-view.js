@@ -62,7 +62,7 @@
     return `<section class="bn-panel bn-snapshot" aria-label="Current monitor status"><h3>Current status <span class="bn-live-dot" title="Latest observations, not live network status"></span></h3>
       <div class="bn-status-trio"><div><strong class="bn-color-down">${n.down}</strong><small>Down</small></div><div><strong class="bn-color-up">${n.up}</strong><small>Up</small></div><div><strong class="bn-color-pending">${n.degraded + n.pending}</strong><small>Pending</small></div></div>
       <div class="bn-snapshot-footer">Monitoring <strong>${n.total}</strong> of <strong>${num(dash?.limit)}</strong> allowed sites</div></section>
-      <section class="bn-panel bn-facts"><h3>Last 30 days</h3><div class="bn-fact"><span>Check success rate</span><strong>${percent}</strong></div><div class="bn-fact"><span>Recorded primary checks</span><strong>${samples.toLocaleString()}</strong></div><div class="bn-fact"><span>Recorded incidents</span><strong>${(dash?.incidents || []).length}${(dash?.incidents || []).length === 30 ? '+' : ''}</strong></div><p>Check-based observations, not a time-weighted SLA. No data means no claim of uptime.</p></section>`;
+      <section class="bn-panel bn-facts"><h3>Check history</h3><div class="bn-fact"><span>30-day check success rate</span><strong>${percent}</strong></div><div class="bn-fact"><span>30-day primary checks</span><strong>${samples.toLocaleString()}</strong></div><div class="bn-fact"><span>Recent incident records</span><strong>${(dash?.incidents || []).length}${(dash?.incidents || []).length === 30 ? '+' : ''}</strong></div><p>Check-based observations, not a time-weighted SLA. No data means no claim of uptime.</p></section>`;
   }
 
   function addForm() {
