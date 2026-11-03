@@ -183,9 +183,17 @@ def init_db():
             ('required_phrase', "TEXT NOT NULL DEFAULT ''"),
             ('expected_status', 'INTEGER'),
             ('max_response_ms', 'INTEGER'),
+            ('heartbeat_token_hash', 'TEXT'),
+            ('heartbeat_interval_s', 'INTEGER'),
+            ('heartbeat_grace_s', 'INTEGER'),
+            ('heartbeat_due_at', 'INTEGER'),
+            ('heartbeat_last_at', 'INTEGER'),
         ):
             if name not in monitor_columns:
                 c.execute(f'ALTER TABLE monitors ADD COLUMN {name} {column_type}')
+        c.execute('CREATE UNIQUE INDEX IF NOT EXISTS heartbeat_token ON monitors(heartbeat_token_hash)')
+        c.execute('''CREATE INDEX IF NOT EXISTS heartbeat_due ON monitors(heartbeat_due_at)
+                     WHERE heartbeat_interval_s IS NOT NULL AND state!='down' ''')
 
 
 def make_password(password: str) -> str:
@@ -463,31 +471,40 @@ probe_locks = {}
 
 def record_check(monitor_id, result, region='primary'):
     with db() as c:
-        m=c.execute('SELECT m.* ' + ACTIVE_MONITORS + ' AND m.id=?',(monitor_id,)).fetchone()
+        m=c.execute('SELECT m.* ' + ACTIVE_MONITORS + ' AND m.id=? AND m.heartbeat_interval_s IS NULL',(monitor_id,)).fetchone()
         if not m: raise HTTPException(404,'Monitor not found')
-        failures=m['consecutive_failures']+1 if result['state']=='down' else 0
-        state='down' if failures>=2 else 'degraded' if failures>0 else 'up'
-        timestamp=now()
-        c.execute('''UPDATE monitors SET last_checked=?,state=?,consecutive_failures=?,http_code=?,response_ms=?,cert_days=?,error=? WHERE id=?''',
-          (timestamp,state,failures,result['http_code'],result['response_ms'],result['cert_days'],result['error'],monitor_id))
-        c.execute('''INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error)
-                    VALUES(?,?,?,?,?,?,?,?)''',(monitor_id,region,timestamp,state,result['http_code'],result['response_ms'],result['cert_days'],result['error']))
-        incident=c.execute('SELECT id FROM incidents WHERE monitor_id=? AND resolved_at IS NULL ORDER BY id DESC LIMIT 1',(monitor_id,)).fetchone()
-        if state=='down' and not incident:
-            reason = result['error'] or 'Check failed'
-            summary = f'{m["name"]} failed its monitoring checks'
-            c.execute('INSERT INTO incidents(monitor_id,opened_at,summary) VALUES(?,?,?)',(monitor_id,timestamp,summary))
-            c.execute('INSERT INTO notifications(user_id,monitor_id,kind,message,created_at) VALUES(?,?,?,?,?)',
-                      (m['user_id'],monitor_id,'outage',f'{m["name"]}: {reason}',timestamp))
-            enqueue_alert(c,m['user_id'],'BeepNado outage: '+m['name'],
-                          f'Two checks failed for {m["name"]} at {timestamp} UTC.\nLatest result: {reason}\nLog in to {SITE_URL} to investigate.')
-        elif state=='up' and incident:
-            c.execute('UPDATE incidents SET resolved_at=? WHERE id=?',(timestamp,incident['id']))
-            c.execute('INSERT INTO notifications(user_id,monitor_id,kind,message,created_at) VALUES(?,?,?,?,?)',
-                      (m['user_id'],monitor_id,'recovery',f'{m["name"]}: website is responding again',timestamp))
-            enqueue_alert(c,m['user_id'],'BeepNado recovery: '+m['name'],
-                          f'{m["name"]} responded successfully at {timestamp} UTC.\nSee {SITE_URL} for observations.')
-        return {'state':state,'checked_at':timestamp,'http_code':result['http_code'],'response_ms':result['response_ms']}
+        return record_observation(c, m, result, region)
+
+
+def record_observation(c, m, result, region):
+    monitor_id = m['id']
+    heartbeat = region == 'heartbeat'
+    failures=m['consecutive_failures']+1 if result['state']=='down' else 0
+    state='down' if failures>=(1 if heartbeat else 2) else 'degraded' if failures>0 else 'up'
+    timestamp=now()
+    c.execute('''UPDATE monitors SET last_checked=?,state=?,consecutive_failures=?,http_code=?,response_ms=?,cert_days=?,error=? WHERE id=?''',
+      (timestamp,state,failures,result['http_code'],result['response_ms'],result['cert_days'],result['error'],monitor_id))
+    c.execute('''INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error)
+                VALUES(?,?,?,?,?,?,?,?)''',(monitor_id,region,timestamp,state,result['http_code'],result['response_ms'],result['cert_days'],result['error']))
+    incident=c.execute('SELECT id FROM incidents WHERE monitor_id=? AND resolved_at IS NULL ORDER BY id DESC LIMIT 1',(monitor_id,)).fetchone()
+    if state=='down' and not incident:
+        reason = result['error'] or 'Check failed'
+        summary = f'{m["name"]} missed a heartbeat' if heartbeat else f'{m["name"]} failed its monitoring checks'
+        opening = f'{m["name"]} missed a heartbeat' if heartbeat else f'Two checks failed for {m["name"]}'
+        c.execute('INSERT INTO incidents(monitor_id,opened_at,summary) VALUES(?,?,?)',(monitor_id,timestamp,summary))
+        c.execute('INSERT INTO notifications(user_id,monitor_id,kind,message,created_at) VALUES(?,?,?,?,?)',
+                  (m['user_id'],monitor_id,'outage',f'{m["name"]}: {reason}',timestamp))
+        enqueue_alert(c,m['user_id'],'BeepNado outage: '+m['name'],
+                      f'{opening} at {timestamp} UTC.\nLatest result: {reason}\nLog in to {SITE_URL} to investigate.')
+    elif state=='up' and incident:
+        recovery = 'heartbeat received' if heartbeat else 'website is responding again'
+        recovery_event = 'sent a heartbeat' if heartbeat else 'responded successfully'
+        c.execute('UPDATE incidents SET resolved_at=? WHERE id=?',(timestamp,incident['id']))
+        c.execute('INSERT INTO notifications(user_id,monitor_id,kind,message,created_at) VALUES(?,?,?,?,?)',
+                  (m['user_id'],monitor_id,'recovery',f'{m["name"]}: {recovery}',timestamp))
+        enqueue_alert(c,m['user_id'],'BeepNado recovery: '+m['name'],
+                      f'{m["name"]} {recovery_event} at {timestamp} UTC.\nSee {SITE_URL} for observations.')
+    return {'state':state,'checked_at':timestamp,'http_code':result['http_code'],'response_ms':result['response_ms']}
 
 
 async def check_monitor(monitor_id):
@@ -495,7 +512,7 @@ async def check_monitor(monitor_id):
     async with lock:
         with db() as c:
             mon=c.execute('SELECT m.url,m.required_phrase,m.expected_status,m.max_response_ms ' +
-                          ACTIVE_MONITORS + ' AND m.id=?',(monitor_id,)).fetchone()
+                          ACTIVE_MONITORS + ' AND m.id=? AND m.heartbeat_interval_s IS NULL',(monitor_id,)).fetchone()
         if not mon:return None
         return record_check(monitor_id, await probe(
             mon['url'], required_phrase=mon['required_phrase'],
@@ -509,7 +526,7 @@ async def scheduler():
         try:
             due=[]; clock=datetime.now(timezone.utc)
             with db() as c:
-                for row in c.execute('SELECT m.id,m.last_checked,u.plan ' + ACTIVE_MONITORS):
+                for row in c.execute('SELECT m.id,m.last_checked,u.plan ' + ACTIVE_MONITORS + ' AND m.heartbeat_interval_s IS NULL'):
                     wait=PLAN_INTERVALS.get(row['plan'],300)
                     if not row['last_checked'] or (clock-datetime.fromisoformat(row['last_checked'])).total_seconds()>=wait:
                         due.append(row['id'])
@@ -525,6 +542,31 @@ async def scheduler():
             await asyncio.gather(*(run(i) for i in due))
         except asyncio.CancelledError:raise
         except Exception as exc: print('Scheduler error',type(exc).__name__,flush=True)
+        await asyncio.sleep(10)
+
+
+def heartbeat_observation(c, monitor, state, error=None):
+    record_observation(c, monitor, {
+        'state': state, 'error': error, 'http_code': None, 'response_ms': None, 'cert_days': None,
+    }, 'heartbeat')
+
+
+def expire_heartbeats():
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        overdue = c.execute('SELECT m.* ' + ACTIVE_MONITORS + '''
+            AND m.heartbeat_interval_s IS NOT NULL AND m.state!='down' AND m.heartbeat_due_at<?
+        ''', (int(time.time()),)).fetchall()
+        for monitor in overdue:
+            heartbeat_observation(c, monitor, 'down', 'No heartbeat arrived before the deadline')
+
+
+async def heartbeat_scheduler():
+    while True:
+        try:
+            await asyncio.to_thread(expire_heartbeats)
+        except Exception as exc:
+            print('Heartbeat scheduler error:', type(exc).__name__, flush=True)
         await asyncio.sleep(10)
 
 
@@ -544,7 +586,7 @@ async def email_delivery_scheduler():
 @asynccontextmanager
 async def lifespan(app):
     init_db()
-    tasks=[asyncio.create_task(scheduler()), asyncio.create_task(email_delivery_scheduler())]
+    tasks = [asyncio.create_task(run()) for run in (scheduler, heartbeat_scheduler, email_delivery_scheduler)]
     try:
         yield
     finally:
@@ -779,6 +821,8 @@ def dashboard(user=Depends(require_user)):
              WHERE m.user_id=? AND ch.region='primary' AND ch.checked_at>=?
              GROUP BY ch.monitor_id''',(user['id'],cutoff))}
         for mon in monitors:
+            mon.pop('heartbeat_token_hash')
+            mon['kind'] = 'heartbeat' if mon['heartbeat_interval_s'] is not None else 'http'
             stat=samples.get(mon['id'])
             mon['samples_30d']=int(stat['total']) if stat else 0
             mon['success_rate_30d']=round(100*stat['passed']/stat['total'],2) if stat and stat['total'] else None
@@ -800,6 +844,13 @@ class MonitorInput(CheckRules):
     authorized:bool
 
 
+def require_monitor_capacity(c, user_id):
+    current = c.execute('SELECT plan FROM users WHERE id=?',(user_id,)).fetchone()
+    if not current:raise HTTPException(401,'Sign in to continue')
+    count=c.execute('SELECT COUNT(*) FROM monitors WHERE user_id=?',(user_id,)).fetchone()[0]
+    if count>=PLAN_LIMITS[current['plan']]:raise HTTPException(403,'Plan monitor limit reached')
+
+
 @app.post('/api/monitors',status_code=201)
 async def add_monitor(input:MonitorInput,user=Depends(require_csrf)):
     if not input.authorized:raise HTTPException(422,'You must have authorization to monitor the website')
@@ -807,10 +858,7 @@ async def add_monitor(input:MonitorInput,user=Depends(require_csrf)):
     except ValueError as e:raise HTTPException(422,str(e)) from e
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
-        current = c.execute('SELECT plan FROM users WHERE id=?',(user['id'],)).fetchone()
-        if not current:raise HTTPException(401,'Sign in to continue')
-        count=c.execute('SELECT COUNT(*) FROM monitors WHERE user_id=?',(user['id'],)).fetchone()[0]
-        if count>=PLAN_LIMITS[current['plan']]:raise HTTPException(403,'Plan monitor limit reached')
+        require_monitor_capacity(c, user['id'])
         cur=c.execute(
             '''INSERT INTO monitors(user_id,name,url,created_at,required_phrase,expected_status,max_response_ms)
                VALUES(?,?,?,?,?,?,?)''',
@@ -819,10 +867,76 @@ async def add_monitor(input:MonitorInput,user=Depends(require_csrf)):
         return {'id':cur.lastrowid,'ok':True}
 
 
+class HeartbeatInput(BaseModel):
+    name: str = Field(min_length=2, max_length=100, pattern=r'\S')
+    interval_minutes: int = Field(ge=1, le=43200)
+    grace_minutes: int = Field(ge=0, le=1440)
+
+
+@app.post('/api/monitors/heartbeat', status_code=201)
+def add_heartbeat(input: HeartbeatInput, user=Depends(require_csrf)):
+    token = secrets.token_urlsafe(32)
+    interval, grace = input.interval_minutes * 60, input.grace_minutes * 60
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        require_monitor_capacity(c, user['id'])
+        cur = c.execute('''INSERT INTO monitors
+            (user_id,name,url,created_at,heartbeat_token_hash,heartbeat_interval_s,heartbeat_grace_s,heartbeat_due_at)
+            VALUES (?,?,'',?,?,?,?,?)''',
+            (user['id'], input.name.strip(), now(), hashlib.sha256(token.encode()).hexdigest(),
+             interval, grace, int(time.time()) + interval + grace),
+        )
+    return {'id': cur.lastrowid, 'token': token}
+
+
+@app.post('/api/monitors/{monitor_id}/heartbeat-token')
+def rotate_heartbeat_token(monitor_id: int, user=Depends(require_csrf)):
+    token = secrets.token_urlsafe(32)
+    with db() as c:
+        cur = c.execute('''UPDATE monitors SET heartbeat_token_hash=?
+            WHERE id=? AND user_id=? AND heartbeat_interval_s IS NOT NULL''',
+            (hashlib.sha256(token.encode()).hexdigest(), monitor_id, user['id']),
+        )
+        if not cur.rowcount:
+            raise HTTPException(404, 'Monitor not found')
+    return {'token': token}
+
+
+@app.post('/api/heartbeat', status_code=204)
+def receive_heartbeat(request: Request):
+    auth = request.headers.get('authorization', '')
+    match = re.fullmatch(r'Bearer ([A-Za-z0-9_-]{43})', auth, flags=re.IGNORECASE | re.ASCII)
+    if not match:
+        raise HTTPException(401, 'Heartbeat bearer token required')
+    digest = hashlib.sha256(match[1].encode()).hexdigest()
+    with db() as c:
+        # Reject invalid credentials without taking the write lock.
+        if not c.execute('SELECT 1 FROM monitors WHERE heartbeat_token_hash=?', (digest,)).fetchone():
+            raise HTTPException(404, 'Heartbeat monitor not found')
+        c.execute('BEGIN IMMEDIATE')
+        monitor = c.execute('SELECT m.* ' + ACTIVE_MONITORS + ' AND m.heartbeat_token_hash=?', (digest,)).fetchone()
+        if not monitor:
+            raise HTTPException(404, 'Active heartbeat monitor not found')
+        clock = int(time.time())
+        last = monitor['heartbeat_last_at']
+        if last is not None and last > clock - 5:
+            return Response(status_code=204)
+        overdue = monitor['heartbeat_due_at'] < clock
+        if monitor['state'] != 'down' and overdue:
+            heartbeat_observation(c, monitor, 'down', 'No heartbeat arrived before the deadline')
+        if monitor['state'] != 'up' or overdue or (
+            clock - datetime.fromisoformat(monitor['last_checked']).timestamp() >= 60
+        ):
+            heartbeat_observation(c, monitor, 'up')
+        c.execute('UPDATE monitors SET heartbeat_due_at=?,heartbeat_last_at=? WHERE id=?',
+                  (clock + monitor['heartbeat_interval_s'] + monitor['heartbeat_grace_s'], clock, monitor['id']))
+    return Response(status_code=204)
+
+
 @app.patch('/api/monitors/{monitor_id}/rules')
 async def update_monitor_rules(monitor_id: int, input: CheckRules, user=Depends(require_csrf)):
     with db() as c:
-        if not c.execute('SELECT 1 FROM monitors WHERE id=? AND user_id=?',
+        if not c.execute('SELECT 1 FROM monitors WHERE id=? AND user_id=? AND heartbeat_interval_s IS NULL',
                          (monitor_id, user['id'])).fetchone():
             raise HTTPException(404, 'Monitor not found')
     # Let any in-flight check finish before invalidating its latest state.
@@ -832,7 +946,7 @@ async def update_monitor_rules(monitor_id: int, input: CheckRules, user=Depends(
             c.execute('BEGIN IMMEDIATE')
             previous = c.execute(
                 '''SELECT required_phrase,expected_status,max_response_ms
-                   FROM monitors WHERE id=? AND user_id=?''', (monitor_id, user['id']),
+                   FROM monitors WHERE id=? AND user_id=? AND heartbeat_interval_s IS NULL''', (monitor_id, user['id']),
             ).fetchone()
             if previous is None:
                 raise HTTPException(404, 'Monitor not found')
@@ -861,12 +975,14 @@ def delete_monitor(monitor_id:int,user=Depends(require_csrf)):
 @app.post('/api/monitors/{monitor_id}/check')
 async def manual_check(monitor_id:int,user=Depends(require_csrf)):
     with db() as c:
-        monitor=c.execute('SELECT m.last_checked ' + ACTIVE_MONITORS + ' AND m.id=? AND m.user_id=?',
+        monitor=c.execute('SELECT m.last_checked,m.heartbeat_interval_s ' + ACTIVE_MONITORS + ' AND m.id=? AND m.user_id=?',
                           (monitor_id,user['id'])).fetchone()
         if not monitor and c.execute('SELECT 1 FROM monitors WHERE id=? AND user_id=?',
                                      (monitor_id,user['id'])).fetchone():
             raise HTTPException(403,'This monitor is paused under your current plan')
     if not monitor:raise HTTPException(404,'Monitor not found')
+    if monitor['heartbeat_interval_s'] is not None:
+        raise HTTPException(409, 'Heartbeat monitors receive check-ins from your job')
     if monitor['last_checked'] and (datetime.now(timezone.utc)-datetime.fromisoformat(monitor['last_checked'])).total_seconds()<15:
         raise HTTPException(429,'Wait 15 seconds between manual checks')
     result = await check_monitor(monitor_id)
@@ -1101,7 +1217,7 @@ def reconcile_subscription(event, sub):
 def remote_targets(request:Request):
     if not WORKER_TOKEN or len(WORKER_TOKEN)<32 or not hmac.compare_digest(request.headers.get('x-worker-token',''),WORKER_TOKEN):
         raise HTTPException(401,'Worker not authorized')
-    with db() as c:targets=[{'id':row['id'],'url':row['url']} for row in c.execute('SELECT m.id,m.url ' + ACTIVE_MONITORS)]
+    with db() as c:targets=[{'id':row['id'],'url':row['url']} for row in c.execute('SELECT m.id,m.url ' + ACTIVE_MONITORS + ' AND m.heartbeat_interval_s IS NULL')]
     return {'targets':targets}
 
 
@@ -1122,7 +1238,7 @@ def remote_result(item:WorkerResult,request:Request):
     if item.state not in ('up','down') or item.region=='primary':raise HTTPException(422,'Invalid result')
     # Regional measurements are stored separately; they cannot create/close primary incidents.
     with db() as c:
-        if not c.execute('SELECT 1 ' + ACTIVE_MONITORS + ' AND m.id=?',(item.monitor_id,)).fetchone():raise HTTPException(404)
+        if not c.execute('SELECT 1 ' + ACTIVE_MONITORS + ' AND m.id=? AND m.heartbeat_interval_s IS NULL',(item.monitor_id,)).fetchone():raise HTTPException(404)
         c.execute('INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error) VALUES(?,?,?,?,?,?,?,?)',
                   (item.monitor_id,item.region,now(),item.state,item.http_code,item.response_ms,item.cert_days,(item.error or '')[:100]))
     return {'ok':True}

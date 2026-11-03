@@ -194,3 +194,9 @@
 .bn-rules-dialog .work-form label{color:#c2d0e1}
 .bn-rules-dialog .work-form input{width:100%;background:#152439;border-color:#3d526c;color:#f1f6ff}
 .bn-rules-dialog .work-form input:focus-visible{outline:2px solid #ffa78f;outline-offset:2px}
+
+/* Heartbeat monitors */
+.bn-monitor-fields{display:grid;gap:12px;border:0;margin:0;padding:0;min-width:0}
+.bn-monitor-fields[hidden]{display:none}
+.bn-add-panel select[name=kind]{width:100%;background:#152439;border:1px solid #3d526c;border-radius:8px;color:#f1f6ff;padding:9px;font:inherit}
+.bn-heartbeat-command{background:#0e1826;color:#e4edf8;border:1px solid #3d526c;border-radius:8px;padding:14px;white-space:pre-wrap;overflow-wrap:anywhere;user-select:all}

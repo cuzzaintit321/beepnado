@@ -26,6 +26,12 @@ bash ~/beepnado-launch/scripts/deploy_public_investigator.sh
 
 The second script updates only the public BeepNado marketing HTML and stylesheet, taking backups. Neither script configures live Stripe payments. Monitoring on the same server still cannot independently detect host-wide or Internet outages.
 
+## Heartbeat monitors
+
+To monitor a cron job, backup, or scheduled task, open **Monitors**, choose **Heartbeat**, and set the expected interval and grace period. Copy the private check-in command and run it only after the job succeeds. BeepNado opens an incident when the interval plus grace period elapses and resolves it when the next check-in arrives. The alert feed records both events and configured SMTP sends email to verified accounts.
+
+Website and heartbeat monitors share the account's monitor limit. The command is shown when the monitor is created. **Replace key** generates a fresh command and invalidates the old one immediately.
+
 ## Dark monitoring workspace (v3)
 
 BeepNado's signed-in monitoring UI now uses a compact dark operations layout inspired by modern uptime dashboards while preserving its own branding. It includes searchable/filterable monitors, recent check tick bars **only where actual check records exist**, up/down/pending totals, 30-day check-success statistics, manual checks, monitor creation, and access to incident history and status pages.

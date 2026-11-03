@@ -29,16 +29,23 @@
   function monitorItem(m) {
     const state = m.last_checked ? (m.state || 'pending') : 'pending';
     const id = num(m.id);
+    const heartbeat = m.kind === 'heartbeat';
+    const target = heartbeat ? 'Heartbeat · every ' + m.heartbeat_interval_s / 60 + ' min' : m.url;
+    const timing = heartbeat
+      ? (m.heartbeat_last_at == null ? 'Awaiting first ping' : 'Last ping ' + fmt(new Date(m.heartbeat_last_at * 1000).toISOString()))
+      : (m.last_checked ? 'Checked ' + fmt(m.last_checked) : 'Awaiting first check');
     const pct = m.samples_30d ? `${num(m.success_rate_30d).toFixed(2)}%` : '—';
     const rules = [m.required_phrase && 'Required phrase', m.expected_status && 'HTTP ' + m.expected_status,
       m.max_response_ms && '≤ ' + m.max_response_ms + ' ms'].filter(Boolean).join(' · ');
     return `<article class="bn-monitor-row" aria-label="${tidy(m.name)}: ${tidy(prettyState(state))}">
       <div class="bn-monitor-identity"><span class="bn-state-dot bn-${tidy(state)}" aria-hidden="true"></span>
-        <div class="bn-monitor-title"><strong>${tidy(m.name)}</strong><span class="bn-host" title="${tidy(m.url)}">${tidy(m.url)}</span>${rules ? '<span class="bn-host">' + tidy(rules) + '</span>' : ''}</div></div>
-      <div class="bn-monitor-meta"><span>${pill(state)}</span><small>${m.last_checked ? 'Checked ' + tidy(fmt(m.last_checked)) : 'Awaiting first check'}</small></div>
+        <div class="bn-monitor-title"><strong>${tidy(m.name)}</strong><span class="bn-host" title="${tidy(target)}">${tidy(target)}</span>${rules ? '<span class="bn-host">' + tidy(rules) + '</span>' : ''}</div></div>
+      <div class="bn-monitor-meta"><span>${pill(state)}</span><small>${tidy(timing)}</small></div>
       ${recentBars(m)}
-      <div class="bn-monitor-metrics"><strong>${pct}</strong><small>30d checks passed</small><span>${m.response_ms == null ? '—' : num(m.response_ms) + ' ms'} latest</span></div>
-      <div class="bn-monitor-actions"><button class="bn-btn bn-btn-small" type="button" data-check-rules="${id}" aria-label="Check rules for ${tidy(m.name)}">Rules</button><button class="bn-btn bn-btn-small bn-investigate-button" data-investigate="${id}" aria-label="Investigate ${tidy(m.name)}">Investigate ↗</button><button class="bn-btn bn-btn-small" data-check="${id}" aria-label="Check ${tidy(m.name)} now">Check now</button><button class="bn-icon-btn" data-remove="${id}" aria-label="Remove ${tidy(m.name)}" title="Remove monitor">×</button></div>
+      <div class="bn-monitor-metrics">${heartbeat
+        ? '<strong>' + num(m.heartbeat_grace_s) / 60 + ' min</strong><small>Grace period</small>'
+        : '<strong>' + pct + '</strong><small>30d checks passed</small><span>' + (m.response_ms == null ? '—' : num(m.response_ms) + ' ms') + ' latest</span>'}</div>
+      <div class="bn-monitor-actions">${heartbeat ? '<button class="bn-btn bn-btn-small" data-heartbeat-token="' + id + '">Replace key</button>' : '<button class="bn-btn bn-btn-small" data-check-rules="' + id + '" aria-label="Check rules for ' + tidy(m.name) + '">Rules</button>'}<button class="bn-btn bn-btn-small bn-investigate-button" data-investigate="${id}" aria-label="Investigate ${tidy(m.name)}">Investigate ↗</button>${heartbeat ? '' : '<button class="bn-btn bn-btn-small" data-check="' + id + '" aria-label="Check ' + tidy(m.name) + ' now">Check now</button>'}<button class="bn-icon-btn" data-remove="${id}" aria-label="Remove ${tidy(m.name)}" title="Remove monitor">×</button></div>
     </article>`;
   }
 
@@ -48,7 +55,12 @@
   investigatorDialog.className='bn-investigator-dialog';
   document.body.appendChild(investigatorDialog);
   let copyableReport='';
-  function investigatorHint(c) {
+  function investigatorHint(c, heartbeat) {
+    if (heartbeat) {
+      if (!c) return ['Awaiting first heartbeat','No check-in has been recorded.','Run the check-in command after the job succeeds.'];
+      if (c.state==='up') return ['Heartbeat received','The job sent a check-in.','Review the schedule and recent check-ins.'];
+      return ['Missed heartbeat',c.error,'Check the job logs, the schedule and whether its check-in command ran.'];
+    }
     if (!c) return ['No observations yet','The monitor has not recorded a check.','Run a check to collect evidence.'];
     const err=String(c.error||''), code=Number(c.http_code||0);
     if (/gaierror|name or service not known|dns|name resolution/i.test(err)) return ['DNS resolution','The hostname did not resolve during this check.','Check authoritative DNS and propagation.'];
@@ -68,12 +80,14 @@
   }
   function investigateMonitor(m) {
     const checks=getChecks().filter(c=>Number(c.monitor_id)===Number(m.id)).slice(0,10);
-    const latest=m.last_checked ? (checks.find(c=>c.region==='primary' && c.checked_at===m.last_checked) || m) : null;
-    const hint=investigatorHint(latest);
-    let safeUrl=String(m.url||'').split('?')[0];
+    const heartbeat=m.kind==='heartbeat';
+    const region=heartbeat?'heartbeat':'primary';
+    const latest=m.last_checked ? (checks.find(c=>c.region===region && c.checked_at===m.last_checked) || m) : null;
+    const hint=investigatorHint(latest, heartbeat);
+    let safeUrl=heartbeat?'Heartbeat':String(m.url||'').split('?')[0];
     try { const u=new URL(m.url); safeUrl=u.origin+u.pathname; } catch(e){}
     const observed=latest?(latest.checked_at||m.last_checked):null;
-    const lines=checks.map(c=>fmt(c.checked_at)+' | '+prettyState(c.state)+' | HTTP '+(c.http_code??'—')+' | '+(c.response_ms??'—')+'ms');
+    const lines=checks.map(c=>fmt(c.checked_at)+' | '+prettyState(c.state)+(heartbeat?'':' | HTTP '+(c.http_code??'—')+' | '+(c.response_ms??'—')+'ms'));
     copyableReport=[
       'BEEPNADO INCIDENT INVESTIGATOR · Evidence-based report',
       'Monitor: '+m.name+' · '+safeUrl,
@@ -87,7 +101,7 @@
       'Interpretation is not a confirmed root cause. Same-host checks cannot detect whole-server or Internet outages.'
     ].join('\n');
     const history=checks.length?checks.map(c=>
-      '<div class="bn-investigation-row"><span>'+tidy(fmt(c.checked_at))+'</span><span>'+tidy(prettyState(c.state))+'</span><span>HTTP '+tidy(c.http_code??'—')+'</span><span>'+tidy(c.response_ms==null?'—':c.response_ms+' ms')+'</span></div>').join(''):'<p>No check history yet.</p>';
+      '<div class="bn-investigation-row"><span>'+tidy(fmt(c.checked_at))+'</span><span>'+tidy(prettyState(c.state))+'</span>'+(heartbeat?'':'<span>HTTP '+tidy(c.http_code??'—')+'</span><span>'+tidy(c.response_ms==null?'—':c.response_ms+' ms')+'</span>')+'</div>').join(''):'<p>No check history yet.</p>';
     investigatorDialog.innerHTML=
       '<div class="bn-investigator-top"><span>REAL CHECK EVIDENCE · BEEPNADO</span><button type="button" data-investigator-close aria-label="Close">×</button></div>'+
       '<h2>Incident Investigator</h2><p>'+tidy(m.name)+' · '+tidy(safeUrl)+'</p>'+
@@ -117,7 +131,7 @@
   }
 
   function emptyList() {
-    return '<div class="bn-empty-state"><div class="bn-empty-icon">◉</div><strong>No matching monitors</strong><p>Try another search or status filter, or add a public website.</p></div>';
+    return '<div class="bn-empty-state"><div class="bn-empty-icon">◉</div><strong>No matching monitors</strong><p>Try another search or status filter, or add a monitor.</p></div>';
   }
 
   function sideSnapshot() {
@@ -128,7 +142,7 @@
     const percent = samples ? (passed / samples * 100).toFixed(2) + '%' : '—';
     return `<section class="bn-panel bn-snapshot" aria-label="Current monitor status"><h3>Current status <span class="bn-live-dot" title="Latest observations, not live network status"></span></h3>
       <div class="bn-status-trio"><div><strong class="bn-color-down">${n.down}</strong><small>Down</small></div><div><strong class="bn-color-up">${n.up}</strong><small>Up</small></div><div><strong class="bn-color-pending">${n.degraded + n.pending}</strong><small>Pending</small></div></div>
-      <div class="bn-snapshot-footer">Monitoring <strong>${n.total}</strong> of <strong>${num(dash?.limit)}</strong> allowed sites</div></section>
+      <div class="bn-snapshot-footer">Monitoring <strong>${n.total}</strong> of <strong>${num(dash?.limit)}</strong> allowed monitors</div></section>
       <section class="bn-panel bn-facts"><h3>Check history</h3><div class="bn-fact"><span>30-day check success rate</span><strong>${percent}</strong></div><div class="bn-fact"><span>30-day primary checks</span><strong>${samples.toLocaleString()}</strong></div><div class="bn-fact"><span>Recent incident records</span><strong>${(dash?.incidents || []).length}${(dash?.incidents || []).length === 30 ? '+' : ''}</strong></div><p>Check-based observations, not a time-weighted SLA. No data means no claim of uptime.</p></section>`;
   }
 
@@ -182,22 +196,49 @@
     rulesDialog.showModal();
   }
 
+  const heartbeatDialog=document.createElement('dialog');
+  heartbeatDialog.className='bn-investigator-dialog bn-heartbeat-dialog';
+  heartbeatDialog.setAttribute('aria-labelledby','bn-heartbeat-title');
+  document.body.appendChild(heartbeatDialog);
+  heartbeatDialog.addEventListener('close',()=>heartbeatDialog.replaceChildren());
+
+  function showHeartbeatCommand(token) {
+    const command = "curl --fail --silent --show-error --max-time 15 --request POST --header 'Authorization: Bearer " + token + "' '" + location.origin + "/api/heartbeat'";
+    heartbeatDialog.innerHTML='<h2 id="bn-heartbeat-title">Set up your heartbeat</h2><p>Save this private command now. Run it after your job completes successfully.</p>' +
+      '<pre class="bn-heartbeat-command"></pre><form method="dialog" class="bn-investigator-actions"><button type="button" class="bn-btn bn-btn-primary" data-copy-heartbeat>Copy command</button><button class="bn-btn bn-btn-quiet">Done</button></form>';
+    heartbeatDialog.querySelector('pre').textContent=command;
+    heartbeatDialog.querySelector('[data-copy-heartbeat]').addEventListener('click',async ()=>{
+      try { await navigator.clipboard.writeText(command); toast('Heartbeat command copied'); }
+      catch { toast('Select and copy the command from the dialog'); }
+    });
+    heartbeatDialog.showModal();
+  }
+
   function addForm() {
     const full = getMonitors().length >= num(dash?.limit);
-    return `<section class="bn-panel bn-add-panel" id="bn-add-panel"><div class="bn-panel-title"><h3>Add a website</h3><span>+ New</span></div>
-      <p>Monitor a public website you own or manage.</p><form class="work-form" id="monitor-form">
-        <label>Monitor name<input id="bn-monitor-name" name="name" placeholder="My business website" minlength="2" maxlength="100" required ${full ? 'disabled' : ''}></label>
-        <label>Website URL<input name="url" type="url" placeholder="https://example.com" required maxlength="1500" ${full ? 'disabled' : ''}></label>
-        <details><summary>Optional check rules</summary>${ruleFields({},full)}</details>
-        <label class="bn-consent"><input type="checkbox" name="authorized" required ${full ? 'disabled' : ''}> I own or am authorized to monitor this site.</label>
-        <button class="bn-btn bn-btn-primary bn-btn-wide" type="submit" ${full ? 'disabled' : ''}>+ Add monitor</button>
-      </form><p class="bn-note">${full ? 'Plan limit reached. Remove a monitor before adding another.' : 'First check runs automatically. Public HTTP(S) endpoints only; redirects are not followed.'}</p></section>`;
+    const off = full ? 'disabled' : '';
+    return `<section class="bn-panel bn-add-panel" id="bn-add-panel"><div class="bn-panel-title"><h3>Add a monitor</h3><span>+ New</span></div>
+      <form class="work-form" id="monitor-form">
+        <label>Monitor type<select name="kind" ${off}><option value="http">Website</option><option value="heartbeat">Heartbeat</option></select></label>
+        <label>Monitor name<input id="bn-monitor-name" name="name" placeholder="My business website" minlength="2" maxlength="100" required ${off}></label>
+        <fieldset class="bn-monitor-fields" data-monitor-fields="http" ${off}>
+          <label>Website URL<input name="url" type="url" placeholder="https://example.com" required maxlength="1500"></label>
+          <details><summary>Optional check rules</summary>${ruleFields()}</details>
+          <label class="bn-consent"><input type="checkbox" name="authorized" required> I own or am authorized to monitor this site.</label>
+        </fieldset>
+        <fieldset class="bn-monitor-fields" data-monitor-fields="heartbeat" hidden disabled>
+          <label>Expected interval in minutes<input name="interval_minutes" type="number" min="1" max="43200" value="60" required></label>
+          <label>Grace period in minutes<input name="grace_minutes" type="number" min="0" max="1440" value="5" required></label>
+          <p class="bn-note">If your job misses its interval plus the grace period, BeepNado opens an incident and queues an email alert when email is configured.</p>
+        </fieldset>
+        <button class="bn-btn bn-btn-primary bn-btn-wide" type="submit" ${off}>+ Add monitor</button>
+      </form><p class="bn-note">${full ? 'Plan limit reached. Remove a monitor before adding another.' : 'Website and heartbeat monitors share your plan limit.'}</p></section>`;
   }
 
   function summaryStrip() {
     const n = counts();
     return `<div class="bn-summary-strip" aria-label="Monitor totals">
-      <div><span>Monitored websites</span><strong>${n.total}<small> / ${num(dash?.limit)}</small></strong></div>
+      <div><span>Monitors</span><strong>${n.total}<small> / ${num(dash?.limit)}</small></strong></div>
       <div><span>Operational</span><strong class="bn-color-up">${n.up}</strong></div>
       <div><span>Confirmed down</span><strong class="bn-color-down">${n.down}</strong></div>
       <div><span>Pending / degraded</span><strong class="bn-color-pending">${n.pending + n.degraded}</strong></div>
@@ -205,7 +246,7 @@
   }
 
   function monitorToolbar() {
-    return `<div class="bn-toolbar"><div><h3>Monitors<span class="bn-count">${getMonitors().length}</span></h3><p>Live observations from your website checks</p></div>
+    return `<div class="bn-toolbar"><div><h3>Monitors<span class="bn-count">${getMonitors().length}</span></h3><p>Website checks and job heartbeats</p></div>
       <div class="bn-toolbar-actions"><button class="bn-btn bn-btn-quiet" data-bn-refresh>↻ Refresh</button><button class="bn-btn bn-btn-primary" data-bn-new>+ New monitor</button></div></div>
       <div class="bn-filter-bar"><label class="bn-search-label" for="bn-search">Search monitors<input id="bn-search" type="search" placeholder="Search by name or URL" autocomplete="off" value="${tidy(filterState.query)}"></label>
       <label class="bn-filter-label" for="bn-filter">Status<select id="bn-filter"><option value="all" ${filterState.status==='all'?'selected':''}>All statuses</option><option value="up" ${filterState.status==='up'?'selected':''}>Up</option><option value="down" ${filterState.status==='down'?'selected':''}>Down</option><option value="degraded" ${filterState.status==='degraded'?'selected':''}>Degraded</option><option value="pending" ${filterState.status==='pending'?'selected':''}>Pending</option></select></label></div>`;
@@ -223,20 +264,35 @@
   window.monitors = function monitorsConsole() {
     const list = filteredMonitors();
     $('work-content').innerHTML = `${summaryStrip()}<div class="bn-layout"><div class="bn-main-column"><section class="bn-panel bn-monitor-panel">${monitorToolbar()}
-        <div class="bn-list-heading"><span>WEBSITE</span><span>STATUS</span><span>RECENT CHECKS</span><span>SUCCESS / LATENCY</span><span>ACTIONS</span></div>
+        <div class="bn-list-heading"><span>MONITOR</span><span>STATUS</span><span>RECENT CHECKS</span><span>SUCCESS / LATENCY</span><span>ACTIONS</span></div>
         <div id="bn-monitor-results">${list.length ? list.map(monitorItem).join('') : emptyList()}</div>
         <div class="bn-list-footer" id="bn-results-count">${list.length} of ${getMonitors().length} monitors</div></section>
         <p class="bn-disclosure">Monitoring results reflect checks from this server's configured region. Same-host checks do not detect home Internet or server-wide outages.</p></div>
         <aside class="bn-aside">${sideSnapshot()}${addForm()}</aside></div>`;
     const form = document.getElementById('monitor-form');
+    form?.querySelector('[name=kind]').addEventListener('change', e => {
+      const kind=e.target.value;
+      for (const fields of form.querySelectorAll('[data-monitor-fields]')) {
+        fields.hidden = fields.disabled = fields.dataset.monitorFields !== kind;
+      }
+      form.querySelector('[name=name]').placeholder = kind === 'heartbeat' ? 'Nightly database backup' : 'My business website';
+    });
     form?.addEventListener('submit', async e => {
       e.preventDefault();
       const fd = new FormData(form);
       const button = form.querySelector('[type="submit"]');
       button.disabled = true;
       try {
-        await api('/api/monitors', {method: 'POST', body: JSON.stringify({name:fd.get('name'),url:fd.get('url'),authorized:fd.get('authorized')==='on',...ruleData(fd)})});
-        toast('Monitor added. First check scheduled.');
+        if (fd.get('kind') === 'heartbeat') {
+          const {token} = await api('/api/monitors/heartbeat', {method:'POST',body:JSON.stringify({
+            name:fd.get('name'), interval_minutes:Number(fd.get('interval_minutes')), grace_minutes:Number(fd.get('grace_minutes'))
+          })});
+          showHeartbeatCommand(token);
+          toast('Heartbeat monitor added');
+        } else {
+          await api('/api/monitors', {method:'POST',body:JSON.stringify({name:fd.get('name'),url:fd.get('url'),authorized:fd.get('authorized')==='on',...ruleData(fd)})});
+          toast('Monitor added. First check scheduled.');
+        }
         dash = await api('/api/dashboard');
         renderView();
       } catch(err) {
@@ -251,9 +307,9 @@
     const active = (dash?.incidents || []).filter(i => !i.resolved_at);
     const list = getMonitors().slice(0, 7);
     $('work-content').innerHTML = `${summaryStrip()}<div class="bn-layout"><div class="bn-main-column">
-      <section class="bn-panel bn-monitor-panel"><div class="bn-toolbar"><div><h3>Your websites</h3><p>${n.total ? 'Latest observed states and check history' : 'Add your first website to begin monitoring'}</p></div><button class="bn-btn bn-btn-primary" data-view="monitors">Manage monitors ↗</button></div>
-      <div class="bn-list-heading"><span>WEBSITE</span><span>STATUS</span><span>RECENT CHECKS</span><span>SUCCESS / LATENCY</span><span>ACTIONS</span></div>
-      ${list.length ? list.map(monitorItem).join('') : '<div class="bn-empty-state"><strong>No monitors yet</strong><p>Add a website to start collecting real check results.</p><button class="bn-btn bn-btn-primary" data-view="monitors">+ Add your first monitor</button></div>'}</section>
+      <section class="bn-panel bn-monitor-panel"><div class="bn-toolbar"><div><h3>Your monitors</h3><p>${n.total ? 'Latest observed states and check history' : 'Add your first monitor to begin'}</p></div><button class="bn-btn bn-btn-primary" data-view="monitors">Manage monitors ↗</button></div>
+      <div class="bn-list-heading"><span>MONITOR</span><span>STATUS</span><span>RECENT CHECKS</span><span>SUCCESS / LATENCY</span><span>ACTIONS</span></div>
+      ${list.length ? list.map(monitorItem).join('') : '<div class="bn-empty-state"><strong>No monitors yet</strong><p>Add a website or scheduled job to start monitoring.</p><button class="bn-btn bn-btn-primary" data-view="monitors">+ Add your first monitor</button></div>'}</section>
       <section class="bn-panel bn-recent-panel"><div class="bn-panel-title"><h3>Recent incidents</h3><button class="bn-btn bn-btn-quiet" data-view="incidents">View history ↗</button></div>
       ${active.length ? active.slice(0,5).map(i=>`<div class="bn-incident-item"><span class="bn-state-dot bn-down"></span><div><strong>${tidy(i.monitor_name)}</strong><span>${tidy(i.summary)}</span></div><time>${tidy(fmt(i.opened_at))}</time></div>`).join('') : '<div class="bn-clear">✓ No unresolved incidents recorded</div>'}</section>
       </div><aside class="bn-aside">${sideSnapshot()}<section class="bn-panel bn-tip"><h3>Quick actions</h3><button class="bn-btn bn-btn-primary bn-btn-wide" data-view="monitors">+ Add monitor</button><button class="bn-btn bn-btn-quiet bn-btn-wide" data-view="status">Manage status page ↗</button></section></aside></div>`;
@@ -269,6 +325,16 @@
   main?.addEventListener('click', async e => {
     const button = e.target.closest('button');
     if (!button) return;
+    if (button.hasAttribute('data-heartbeat-token')) {
+      if (!confirm('Replace this heartbeat key? Update your job with the new command. The old key stops working immediately.')) return;
+      button.disabled = true;
+      try {
+        const {token}=await api('/api/monitors/'+num(button.dataset.heartbeatToken)+'/heartbeat-token',{method:'POST'});
+        showHeartbeatCommand(token);
+      } catch (error) { toast(error.message); }
+      finally { button.disabled = false; }
+      return;
+    }
     if (button.hasAttribute('data-check-rules')) {
       const monitor=getMonitors().find(m=>num(m.id)===num(button.dataset.checkRules));
       if (monitor) editRules(monitor);
