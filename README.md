@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="assets/beepnado-cover.webp" alt="BeepNado — Your websites. Our radar. Uptime monitoring dashboard concept artwork" width="100%">
+</p>
+
+*Illustrative cover artwork. Uptime figures, monitored domains and incidents shown are example data.*
+
 # BeepNado 🌪️ — Your websites. Our radar.
 
 **BeepNado** is a self-hosted uptime monitoring platform for small businesses, freelancers, and web agencies. Built with Python, FastAPI, Docker, and SQLite, it tracks HTTP/HTTPS availability, response times, SSL certificate expiry, and outage/recovery history. Users can manage monitors in a secure dashboard and share public status pages. Email alerts require configured SMTP.
