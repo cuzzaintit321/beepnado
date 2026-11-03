@@ -46,6 +46,8 @@ function openAuth(which='register'){
  $('account-resend').hidden=mode!=='login';
  $('account-error').textContent='';
  $('account-success').textContent='';
+ if(mode==='register' && launchCapabilities?.free_registration===false)
+   $('account-error').textContent='Public registration is not open yet. Existing users can sign in.';
  show('auth');
 }
 async function refreshUser(){
@@ -56,6 +58,7 @@ async function loadDashboard(){
  await refreshUser();
  if(!signedIn){openAuth('login');return}
  dash=await api('/api/dashboard');
+ if(!dash.monitors.length) view='monitors';
  $('user-chip').textContent=user.email+' · '+user.plan.toUpperCase();
  show('workspace');renderView();
 }
@@ -75,11 +78,11 @@ function renderView(){
 const empty = (title,text) => `<div class="empty-data"><strong>${title}</strong>${text}</div>`;
 function rowsMonitor(list){
  if(!list.length)return empty('No monitors yet','Add your first website to begin collecting actual checks.');
- return `<div class="table-wrap"><table><thead><tr><th>Website</th><th>State</th><th>HTTP</th><th>Latency</th><th>Last checked</th><th></th></tr></thead><tbody>${list.map(m=>`<tr><td><strong>${esc(m.name)}</strong><div class="small-muted">${esc(m.url)}</div></td><td>${pill(m.state)}</td><td>${m.http_code??'—'}</td><td>${m.response_ms==null?'—':m.response_ms+' ms'}</td><td>${fmt(m.last_checked)}</td><td><div class="table-actions"><button class="tiny-btn" data-check="${m.id}">Check</button><button class="tiny-btn" data-remove="${m.id}">Remove</button></div></td></tr>`).join('')}</tbody></table></div>`;
+ return `<div class="table-wrap"><table><thead><tr><th>Website</th><th>State</th><th>HTTP</th><th>Latency</th><th>Checks passed (30d)</th><th>Last checked</th><th></th></tr></thead><tbody>${list.map(m=>`<tr><td><strong>${esc(m.name)}</strong><div class="small-muted">${esc(m.url)}</div></td><td>${pill(m.state)}</td><td>${m.http_code??'—'}</td><td>${m.response_ms==null?'—':m.response_ms+' ms'}</td><td>${m.samples_30d?m.success_rate_30d+'% ('+m.samples_30d+')':'—'}</td><td>${fmt(m.last_checked)}</td><td><div class="table-actions"><button class="tiny-btn" data-check="${m.id}">Check</button><button class="tiny-btn" data-remove="${m.id}">Remove</button></div></td></tr>`).join('')}</tbody></table></div>`;
 }
 function overview(){
  const up=dash.monitors.filter(x=>x.state==='up').length, down=dash.monitors.filter(x=>x.state==='down').length;
- $('work-content').innerHTML=`<div class="work-cards"><div class="work-card"><span>ACTIVE MONITORS</span><strong>${dash.monitors.length}</strong><small>${dash.limit} maximum on ${esc(dash.plan)}</small></div><div class="work-card"><span>OPERATIONAL</span><strong>${up}</strong><small>Last observed up</small></div><div class="work-card"><span>ACTIVE OUTAGES</span><strong>${down}</strong><small>Confirmed after 2 failures</small></div><div class="work-card"><span>CHECKS RECORDED</span><strong>${dash.checks.length}${dash.checks.length===150?'+':''}</strong><small>Latest recorded samples</small></div></div><div class="work-columns"><div class="panel"><div class="panel-header"><h3>Your websites</h3><button class="work-btn" data-view="monitors">Manage monitors ↗</button></div>${rowsMonitor(dash.monitors.slice(0,8))}</div><div class="panel"><h3>Recent observations</h3>${dash.checks.length?`<div class="table-wrap"><table><thead><tr><th>Monitor</th><th>Region</th><th>Result</th></tr></thead><tbody>${dash.checks.slice(0,9).map(c=>`<tr><td>${esc(c.monitor_name)}<div class="small-muted">${fmt(c.checked_at)}</div></td><td>${esc(c.region)}</td><td>${pill(c.state)}</td></tr>`).join('')}</tbody></table></div>`:empty('No checks yet','New monitors are checked automatically when the scheduler runs.')}</div></div>`;
+ $('work-content').innerHTML=`<div class="work-cards"><div class="work-card"><span>ACTIVE MONITORS</span><strong>${dash.monitors.length}</strong><small>${dash.limit} maximum on ${esc(dash.plan)}</small></div><div class="work-card"><span>OPERATIONAL</span><strong>${up}</strong><small>Last observed up</small></div><div class="work-card"><span>ACTIVE OUTAGES</span><strong>${down}</strong><small>Confirmed after 2 failures</small></div><div class="work-card"><span>CHECKS RECORDED</span><strong>${dash.checks.length}${dash.checks.length===150?'+':''}</strong><small>Latest recorded samples; check-based, not an SLA</small></div></div><div class="work-columns"><div class="panel"><div class="panel-header"><h3>Your websites</h3><button class="work-btn" data-view="monitors">Manage monitors ↗</button></div>${rowsMonitor(dash.monitors.slice(0,8))}</div><div class="panel"><h3>Recent observations</h3>${dash.checks.length?`<div class="table-wrap"><table><thead><tr><th>Monitor</th><th>Region</th><th>Result</th></tr></thead><tbody>${dash.checks.slice(0,9).map(c=>`<tr><td>${esc(c.monitor_name)}<div class="small-muted">${fmt(c.checked_at)}</div></td><td>${esc(c.region)}</td><td>${pill(c.state)}</td></tr>`).join('')}</tbody></table></div>`:empty('No checks yet','New monitors are checked automatically when the scheduler runs.')}</div></div>`;
 }
 function monitors(){
  $('work-content').innerHTML=`<div class="work-columns"><div class="panel"><div class="panel-header"><h3>Monitored websites (${dash.monitors.length}/${dash.limit})</h3></div>${rowsMonitor(dash.monitors)}</div><div class="panel"><h3>Add a public website</h3><form class="work-form" id="monitor-form"><label>Monitor name<input name="name" placeholder="Customer website" minlength="2" maxlength="100" required></label><label>Website URL<input name="url" type="url" placeholder="https://example.com" required maxlength="1500"></label><label><input type="checkbox" name="authorized" required> I own or am authorized to monitor this site.</label><button class="btn btn-accent" type="submit">Add monitor ↗</button></form><p class="work-form-hint">Only publicly resolving HTTP(S) domains are accepted. Checks don't follow redirects or reach private network addresses. Your first results arrive after the scheduler runs.</p></div></div>`;
@@ -99,11 +102,12 @@ function statusSettings(){
 }
 function billing(){
  const list=[['free','Free','$0','2 monitors / 5-minute checks'],['pro','Pro','$12','20 monitors / 1-minute checks'],['team','Team','$39','100 monitors / 1-minute checks']];
- $('work-content').innerHTML=`<div class="panel"><h3>Your account</h3><p><strong>${esc(user.email)}</strong> · ${pill('up')} <span class="small-muted">Current plan: ${esc(user.plan.toUpperCase())}</span></p><p class="billing-note">Your plan controls the number of monitors and primary check interval. Paid billing opens only if Stripe prices and webhooks are configured. Payment cannot be activated by a browser redirect alone.</p></div><div class="pricing-grid section-spaced">${list.map(([id,label,price,description])=>`<div class="price-card"><div class="plan-tag">${esc(label.toUpperCase())}</div><div class="price">${price}<span>/mo</span></div><p>${esc(description)}</p><button class="btn ${id===user.plan?'btn-outline-dark':'btn-accent'}" data-bill-plan="${id}" ${id===user.plan?'disabled':''}>${id===user.plan?'Current plan':id==='free'?'Free tier':'Subscribe ↗'}</button></div>`).join('')}</div>${user.stripe_customer?'<div class="panel section-spaced"><button class="work-btn" id="billing-portal">Manage billing in Stripe ↗</button></div>':''}<p class="billing-note">Prices are proposed. No paid plan is available until a real Stripe account is configured and tested. Cancel or change existing subscriptions in Stripe Billing.</p>`;
+ $('work-content').innerHTML=`<div class="panel"><h3>Your account</h3><p><strong>${esc(user.email)}</strong> · ${pill('up')} <span class="small-muted">Current plan: ${esc(user.plan.toUpperCase())}</span></p><p class="billing-note">Your plan controls the number of monitors and primary check interval. Paid billing opens only if Stripe prices and webhooks are configured. Payment cannot be activated by a browser redirect alone.</p></div><div class="pricing-grid section-spaced">${list.map(([id,label,price,description])=>`<div class="price-card"><div class="plan-tag">${esc(label.toUpperCase())}</div><div class="price">${price}<span>/mo</span></div><p>${esc(description)}</p><button class="btn ${id===user.plan?'btn-outline-dark':'btn-accent'}" data-bill-plan="${id}" ${id===user.plan || (id!=='free'&&!launchCapabilities?.billing)?'disabled':''}>${id===user.plan?'Current plan':id==='free'?'Free tier':launchCapabilities?.billing?'Subscribe ↗':'Planned tier'}</button></div>`).join('')}</div>${user.stripe_customer?'<div class="panel section-spaced"><button class="work-btn" id="billing-portal">Manage billing in Stripe ↗</button></div>':''}<p class="billing-note">Prices are proposed. No paid plan is available until a real Stripe account is configured and tested. Cancel or change existing subscriptions in Stripe Billing.</p>`;
  $('billing-portal')?.addEventListener('click',async()=>{try{const data=await api('/api/billing/portal',{method:'POST'});location.href=data.url}catch(e){toast(e.message)}});
 }
 async function openCheckout(plan){
  if(plan==='free'){toast('Free is available to new accounts. Contact support to downgrade an active paid subscription.');return}
+ if(!launchCapabilities?.billing){toast('Paid plans are not yet available.');return}
  try{const d=await api('/api/billing/checkout',{method:'POST',body:JSON.stringify({plan})});location.href=d.url}catch(e){toast(e.message)}
 }
 async function renderPublicStatus(slug){
@@ -117,12 +121,22 @@ async function renderPublicStatus(slug){
 async function init(){
  const statusMatch=location.pathname.match(/^\/s\/([a-z0-9-]+)$/);
  if(statusMatch){await renderPublicStatus(statusMatch[1]);return}
+ try{launchCapabilities=await api('/api/availability')}catch(e){console.warn('Launch status unavailable')}
  try{await refreshUser()}catch(e){console.warn('Authentication status unavailable')}
  const start=async(which='register')=>{if(signedIn){await loadDashboard()}else openAuth(which)};
  ['nav-getstarted','hero-getstarted','how-start','closing-start'].forEach(id=>$(id)?.addEventListener('click',()=>start('register')));
  $('nav-signin')?.addEventListener('click',()=>start('login'));
  $('account-back')?.addEventListener('click',()=>show('home'));
  $('account-swap')?.addEventListener('click',()=>openAuth(mode==='login'?'register':'login'));
+ $('account-forgot')?.addEventListener('click',()=>openAuth('forgot'));
+ $('account-resend')?.addEventListener('click',async()=>{
+   const email=$('account-email').value.trim();
+   if(!email){$('account-error').textContent='Enter your email address first.';return}
+   $('account-error').textContent='';
+   try{const data=await api('/api/resend-verification',{method:'POST',body:JSON.stringify({email})});
+       $('account-success').textContent=data.message||'Check your inbox.'}
+   catch(err){$('account-error').textContent=err.message}
+ });
  $('mobile-nav')?.addEventListener('click',()=>document.querySelector('.nav-menu').classList.toggle('open'));
  document.querySelectorAll('[data-plan]').forEach(b=>b.addEventListener('click',async()=>{selectedPlan=b.dataset.plan;await start('register');if(signedIn)openCheckout(selectedPlan)}));
  $('account-form').addEventListener('submit',async e=>{
@@ -172,4 +186,10 @@ async function init(){
  else if(location.search.includes('signup')){openAuth('register');if(launchCapabilities?.free_registration===false){$('account-error').textContent='Free signup is not open yet. Email verification must be configured first.'}}
  else if(signedIn){await loadDashboard()}else show('home');
 }
+// Refresh read-only monitoring views automatically while the workspace is open.
+setInterval(async()=>{
+  if(!signedIn || !dash || $('workspace').classList.contains('hidden'))return;
+  if(!['overview','incidents','alerts'].includes(view))return;
+  try{dash=await api('/api/dashboard');renderView()}catch(e){console.warn('Live refresh unavailable')}
+},30000);
 init().catch(e=>{console.error(e);toast('Unable to load the app. Please refresh.')});
