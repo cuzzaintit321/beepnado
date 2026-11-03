@@ -56,6 +56,25 @@ class BeepNadoTests(unittest.TestCase):
         with TestClient(main.app) as outsider:
             self.assertEqual(outsider.get('/api/dashboard').status_code,401)
 
+    def test_owner_only_same_host_route_never_bypasses_public_dns_guard(self):
+        with patch.object(main, 'SELF_HOSTED_PUBLIC_IP', '68.205.135.160'), \
+             patch.object(main, 'SELF_HOSTED_DOMAINS', frozenset({'rebootsyndicate.com'})):
+            self.assertEqual(main.probe_connection_target('rebootsyndicate.com', '68.205.135.160'), 'jason-portfolio')
+            self.assertEqual(main.probe_connection_target('other-site.com', '68.205.135.160'), '68.205.135.160')
+            self.assertEqual(main.probe_connection_target('rebootsyndicate.com.attacker.net', '68.205.135.160'), '68.205.135.160')
+            self.assertEqual(main.probe_connection_target('rebootsyndicate.com', '8.8.8.8'), '8.8.8.8')
+            self.assertEqual(main.probe_connection_target('rebootsyndicate.com', '192.168.1.130'), '192.168.1.130')
+            self.assertEqual(main.probe_connection_target('rebootsyndicate.com', '127.0.0.1'), '127.0.0.1')
+
+    def test_self_host_override_does_not_disable_public_dns_validation(self):
+        async def private_dns(*args,**kwargs):
+            return [(None,None,None,None,('192.168.1.130',443))]
+        with patch.object(main, 'SELF_HOSTED_PUBLIC_IP', '68.205.135.160'), \
+             patch.object(main, 'SELF_HOSTED_DOMAINS', frozenset({'rebootsyndicate.com'})), \
+             patch('asyncio.base_events.BaseEventLoop.getaddrinfo', new=private_dns):
+            r=self.client.post('/api/monitors',headers=self.headers,json={'name':'Internal alias','url':'https://rebootsyndicate.com','authorized':True})
+            self.assertEqual(r.status_code,422,r.text)
+
     def test_url_validation_rejects_private_and_third_party_redirects(self):
         async def private_dns(*args,**kwargs):
             return [(None,None,None,None,('127.0.0.1',443))]
