@@ -170,7 +170,7 @@ print('verified' if allowed else 'missing')
 
 
 def check_webhook(signing):
-    body = '{"id":"evt_beepnado_setup_probe","type":"beepnado.setup_probe","livemode":false,"data":{"object":{}}}'
+    body = '{"id":"evt_beepnado_setup_probe","object":"event","type":"beepnado.setup_probe","livemode":false,"data":{"object":{}}}'
     timestamp = int(time.time())
     signature = hmac.new(signing.encode(), f'{timestamp}.{body}'.encode(), hashlib.sha256).hexdigest()
     status = command('curl', '-sS', '--max-time', '10', '--resolve', f'{HOST}:443:127.0.0.1',
