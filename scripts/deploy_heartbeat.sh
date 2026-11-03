@@ -4,7 +4,9 @@ set -Eeuo pipefail
 release="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 app="$HOME/beepnado"
 state="$HOME/.local/state/beepnado"
-public_page="$HOME/portfolio/site/beepnado/index.html"
+public_root="$HOME/portfolio/site/beepnado"
+public_page="$public_root/index.html"
+public_assets=(robots.txt sitemap.xml guides/check-website-downtime/index.html static/guide.css)
 [[ -f "$app/compose.yaml" && -f "$app/.env" && -f "$public_page" ]] || { echo 'BeepNado application or public homepage missing.' >&2; exit 1; }
 umask 077
 mkdir -p "$state"
@@ -24,15 +26,15 @@ expect_release_file() {
     return 1
 }
 
-expect_release_file app/main.py 463d79e4917dab6a5874dc9a56081a997186bf3a486204f8a73475047bd62c3c 0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1 b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e 8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676 eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370
-expect_release_file app/static/monitor-view.js d7569b521cb79c9bea42afdfb0f043c97b8f0fdcdda7f76c53e65a8518af72b6 a2997738a91b875bccf9709ff7638e5ed510b9947bbc44a3f4aebd4e5a65deae 4a165fd2c214fa63496f7fa6721b5bd1a00ccb65de529c50d234ea23f5e8f00e 4fcefd3fddef0046279c0733450466b0377f5553d679eb9d9f57c5c7b588014f 97deadce2c8cb6be49432d8f77d803b9ba98a7b1736e99505c28b8ac0818c5f5
+expect_release_file app/main.py 463d79e4917dab6a5874dc9a56081a997186bf3a486204f8a73475047bd62c3c 0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1 b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e 8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676 eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370 6eed33a5ba88ed3f848c3766df539ffe6fabd3e3bbd2c7087b28026d78e36ed5
+expect_release_file app/static/monitor-view.js d7569b521cb79c9bea42afdfb0f043c97b8f0fdcdda7f76c53e65a8518af72b6 a2997738a91b875bccf9709ff7638e5ed510b9947bbc44a3f4aebd4e5a65deae 4a165fd2c214fa63496f7fa6721b5bd1a00ccb65de529c50d234ea23f5e8f00e 4fcefd3fddef0046279c0733450466b0377f5553d679eb9d9f57c5c7b588014f 97deadce2c8cb6be49432d8f77d803b9ba98a7b1736e99505c28b8ac0818c5f5 b3a34f0bc39bae085f292d87f347efa25967bd13ff6804302668672e04496e30
 expect_release_file requirements.txt c7b3d34378d337125cc58d87dd542b70322cffac63339196e5c23cdfeb9c9cef ab59b5f98e5e75669346e0f877691470741461658fdaee164162ac885ebc8be4
 
 staged_main="$state/release/app/main.py"
 if [[ -f "$staged_main" ]] && ! cmp -s "$staged_main" "$release/app/main.py"; then
     read -r staged_digest _ < <(sha256sum -- "$staged_main")
     case "$staged_digest" in
-        0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1|b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e|8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676|eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370) ;;
+        0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1|b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e|8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676|eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370|6eed33a5ba88ed3f848c3766df539ffe6fabd3e3bbd2c7087b28026d78e36ed5) ;;
         *) echo 'Existing paid release was modified. Review before updating.' >&2; exit 1 ;;
     esac
 fi
@@ -41,6 +43,14 @@ backup="$(mktemp -d "$state/monitoring-backup.XXXXXXXX")"
 files=(app/main.py app/static/index.html app/static/app.js app/static/monitor-view.js app/static/monitor-theme.css requirements.txt)
 cp -p --parents -- "${files[@]}" "$backup"
 cp -p -- "$public_page" "$backup/public-before.html"
+mkdir "$backup/public-assets"
+for file in "${public_assets[@]}"; do
+    [[ -f "$release/public/$file" ]]
+    if [[ -e "$public_root/$file" ]]; then
+        [[ -f "$public_root/$file" ]] || { echo "Unexpected path $public_root/$file" >&2; exit 1; }
+        (cd "$public_root" && cp -p --parents -- "$file" "$backup/public-assets")
+    fi
+done
 # Patch only the status rendering in app.js, preserving locally deployed billing and signup behavior.
 patch_file="$backup/public-status.patch"
 cat >"$patch_file" <<'PUBLIC_STATUS_PATCH'
@@ -107,7 +117,12 @@ if [[ -f "$staged_main" ]]; then
 fi
 
 caddy() {
-    curl -fsS --max-time 12 --resolve app.beepnado.com:443:127.0.0.1 "https://app.beepnado.com$1"
+    local path="$1"
+    shift
+    curl -fsS --max-time 12 --resolve app.beepnado.com:443:127.0.0.1 "$@" "https://app.beepnado.com$path"
+}
+public_caddy() {
+    curl -fsS --max-time 12 --resolve beepnado.com:443:127.0.0.1 "https://beepnado.com$1"
 }
 caddy /api/availability >"$backup/availability.json"
 docker compose exec -T web python -c '
@@ -127,10 +142,10 @@ with tempfile.TemporaryDirectory() as tmp:
 ' >"$backup/before-monitoring.sqlite3"
 
 publish_public() {
-    local temporary
-    temporary="$(mktemp "$(dirname -- "$public_page")/.beepnado.XXXXXXXX")"
-    cp -p -- "$1" "$temporary"
-    mv -f -- "$temporary" "$public_page"
+    local source="$1" target="$2" temporary
+    temporary="$(mktemp "$(dirname -- "$target")/.beepnado.XXXXXXXX")"
+    cp -p -- "$source" "$temporary"
+    mv -f -- "$temporary" "$target"
 }
 
 rollback() {
@@ -138,8 +153,15 @@ rollback() {
     echo "Restore from $backup" >&2
     for file in "${files[@]}"; do cp -p -- "$backup/$file" "$file"; done
     if ! cmp -s "$backup/public-before.html" "$public_page"; then
-        publish_public "$backup/public-before.html"
+        publish_public "$backup/public-before.html" "$public_page"
     fi
+    for file in "${public_assets[@]}"; do
+        if [[ -f "$backup/public-assets/$file" ]]; then
+            publish_public "$backup/public-assets/$file" "$public_root/$file"
+        else
+            rm -f -- "$public_root/$file"
+        fi
+    done
     if [[ -f "$backup/staged-main.py" ]]; then cp -p -- "$backup/staged-main.py" "$staged_main"; fi
     docker compose up -d --no-deps --build web || true
     exit 1
@@ -149,8 +171,12 @@ cp -- "$ui/app/static/app.js" app/static/app.js
 cp -- "$ui/app/static/index.html" app/static/index.html
 if ! cmp -s "$backup/public-after.html" "$public_page"; then
     chmod --reference="$backup/public-before.html" "$backup/public-after.html"
-    publish_public "$backup/public-after.html"
+    publish_public "$backup/public-after.html" "$public_page"
 fi
+for file in "${public_assets[@]}"; do
+    (umask 022; mkdir -p -- "$(dirname -- "$public_root/$file")")
+    publish_public "$release/public/$file" "$public_root/$file"
+done
 cp -- "$release/app/main.py" app/main.py
 cp -- "$release/app/static/monitor-view.js" app/static/monitor-view.js
 cp -- "$release/requirements.txt" requirements.txt
@@ -168,10 +194,15 @@ for marker in '/* Configurable check rules */' '/* Heartbeat monitors */' '/* Pl
 done
 docker compose up -d --build --no-deps --wait --wait-timeout 90 web
 caddy /health/ready >/dev/null
-caddy / >"$backup/served-workspace.html"
+caddy / -D "$backup/workspace-headers.txt" >"$backup/served-workspace.html"
+grep -Eiq '^x-robots-tag:[[:space:]]*noindex[[:space:]]*$' "$backup/workspace-headers.txt"
 cmp app/static/index.html "$backup/served-workspace.html"
-curl -fsS --max-time 12 --resolve beepnado.com:443:127.0.0.1 https://beepnado.com/ >"$backup/served-public.html"
+public_caddy / >"$backup/served-public.html"
 cmp "$public_page" "$backup/served-public.html"
+for file in "${public_assets[@]}"; do
+    public_caddy "/${file%index.html}" >"$backup/served-seo-asset"
+    cmp "$release/public/$file" "$backup/served-seo-asset"
+done
 status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 12 --resolve app.beepnado.com:443:127.0.0.1 -X POST https://app.beepnado.com/api/heartbeat)"
 [[ "$status" == 401 ]]
 caddy /static/app.js >"$backup/served-app.js"
@@ -192,5 +223,5 @@ if [[ -f "$staged_main" ]]; then
     cp -- "$release/app/main.py" "$staged_main"
 fi
 trap - ERR INT TERM
-echo 'Marketing homepage, workspace entry, and monitoring upgrades deployed and verified through Caddy.'
+echo 'Marketing SEO, workspace entry, and monitoring upgrades deployed and verified through Caddy.'
 echo "Backup: $backup"

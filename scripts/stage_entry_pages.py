@@ -1,4 +1,4 @@
-"""Stage the homepage hero and workspace entry without replacing local page sections."""
+"""Stage homepage metadata, the hero, and the workspace entry."""
 from pathlib import Path
 import re
 import sys
@@ -7,7 +7,12 @@ import sys
 HERO = r'<div class="hero-copy">.*?(?=<div class="hero-visual">)'
 TITLE = r'<title>[^<]+</title>'
 DESCRIPTION = r'<meta name="description"[^>]+>'
-SOCIAL_TITLE = r'<meta property="og:title"[^>]+>'
+PUBLIC_HEAD_TAGS = (
+    TITLE, DESCRIPTION, r'<link rel="canonical"[^>]+>',
+    *(rf'<meta property="og:{field}"[^>]+>' for field in ('type', 'site_name', 'url', 'title', 'description')),
+    r'<script id="beepnado-website-schema"[^>]*>.*?</script>',
+)
+GUIDE_LINK = r'<a href="/guides/check-website-downtime/">[^<]+</a>'
 ENTRY = r'<p id="app-loading".*?(?=<section id="account-screen")'
 OLD_APP_MARKETING = r'<header class="nav">.*?</main>\s*(?=<section id="account-screen")'
 APP_BACK = r'<button\b[^>]*\bid="account-back"[^>]*>.*?</button>'
@@ -25,8 +30,19 @@ def replace(pattern, previous, release):
 
 
 def stage_public(previous, release):
-    for pattern in (HERO, TITLE, SOCIAL_TITLE):
-        previous = replace(pattern, previous, release)
+    previous = replace(HERO, previous, release)
+    head = matched(r'<head>.*?</head>', previous)
+    updated = head
+    for pattern in PUBLIC_HEAD_TAGS:
+        if re.search(pattern, updated, re.S):
+            updated = replace(pattern, updated, release)
+        else:
+            updated = updated.replace('</head>', '\n' + matched(pattern, release) + '\n</head>', 1)
+    previous = previous.replace(head, updated, 1)
+    if not re.search(GUIDE_LINK, previous):
+        pricing_link = matched(r'<a href="#pricing">Pricing</a>(?=</span></footer>)', previous)
+        previous = previous.replace(pricing_link + '</span></footer>',
+                                    pricing_link + ' · ' + matched(GUIDE_LINK, release) + '</span></footer>', 1)
     return previous
 
 

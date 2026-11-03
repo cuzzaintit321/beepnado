@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Is My Website Down? A 5-Step Downtime Checklist | BeepNado</title>
+  <meta name="description" content="Check whether your website is down for everyone or just your network. Test the exact URL, separate DNS and HTTPS errors, and verify recovery from outside.">
+  <link rel="canonical" href="https://beepnado.com/guides/check-website-downtime/">
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="BeepNado">
+  <meta property="og:url" content="https://beepnado.com/guides/check-website-downtime/">
+  <meta property="og:title" content="Is My Website Down? A 5-Step Downtime Checklist">
+  <meta property="og:description" content="Separate a real outage from a local connection problem and verify recovery from outside your network.">
+  <meta name="theme-color" content="#14112b">
+  <link rel="stylesheet" href="/static/site.css">
+  <link rel="stylesheet" href="/static/experience.css?v=2">
+  <link rel="stylesheet" href="/static/guide.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="nav">
+      <a class="brand" href="/" aria-label="BeepNado home">beep<span class="brand-accent">nado.</span></a>
+      <div class="nav-actions"><a class="btn btn-light" href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a></div>
+    </header>
+    <main>
+      <article class="section downtime-guide">
+        <p class="kicker">BEEPNADO FIELD GUIDE</p>
+        <h1>Is my website down? A 5-step downtime checklist</h1>
+        <p class="guide-lead">Open the exact URL on your phone with Wi-Fi off. If it works on mobile data and fails on Wi-Fi, the problem may be on your local network. If both fail, capture the error and check where the request stopped.</p>
+        <p class="guide-credit">By the BeepNado team at <a href="https://rebootsyndicate.com/">Reboot Syndicate</a></p>
+
+        <h2>1. Test the page people actually use</h2>
+        <p>Copy the full URL from the alert, including the hostname and path. A homepage can load while the contact page or storefront fails. Write down the time, time zone, and exact error before refreshing.</p>
+        <p>Try the same URL on a second network. For a site hosted on your own connection, a LAN test can fail if your router cannot send traffic back through its own public IP. The mobile-data result gives you a separate view.</p>
+
+        <h2>2. Capture the HTTP response</h2>
+        <p>Replace the sample URL with the page you want to check, then run the command in a terminal.</p>
+        <pre><code>curl --silent --show-error --max-time 15 --output /dev/null \
+  --write-out 'HTTP %{http_code}\n' https://example.com/</code></pre>
+        <p>A <code>200</code> means the request received a successful HTTP response. Open the page and look for the content customers expect. For a redirect, check the destination too. A <code>503</code> points to a service that is temporarily unavailable. If curl reports an error with <code>HTTP 000</code>, use the accompanying error to investigate the connection.</p>
+
+        <h2>3. Separate DNS, HTTPS, and application failures</h2>
+        <ul>
+          <li><strong>Hostname does not resolve.</strong> Check the hostname and its public DNS records, especially after a domain or hosting change.</li>
+          <li><strong>Certificate warning.</strong> Check the certificate expiry and confirm it covers the hostname you tested.</li>
+          <li><strong>HTTP 502, 503, or 504.</strong> Start with the reverse proxy and the service behind it. Compare their logs at the time of the failed request.</li>
+        </ul>
+        <p>For more detail, see <a href="https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status">MDN’s HTTP status code reference</a>.</p>
+
+        <h2>4. Verify recovery from outside</h2>
+        <p>After a fix, check the same URL again from a separate network. If it is a storefront or contact page, confirm the page shows the expected content. Record the first successful check you observe and update your status page with that timestamp.</p>
+
+        <h2>5. Set up the next check before you need it</h2>
+        <p>Add the public URLs people rely on to an uptime monitor. Keep the alert and recovery history so you can tell when the problem started and when the page came back. For a self-hosted site, use a monitor on another network so it can still report when your home or office connection goes down.</p>
+        <p>BeepNado records scheduled website checks and keeps outage and recovery history in your dashboard. You can also share a public status page with visitors.</p>
+        <p><a class="btn btn-accent" href="/#pricing">See BeepNado plans ↗</a></p>
+      </article>
+    </main>
+    <footer id="site-footer">
+      <div><a href="/"><strong>beepnado.</strong></a><span>Website uptime monitoring and status pages.</span></div>
+      <span>© 2026 BeepNado · <a href="/#pricing">Pricing</a></span>
+    </footer>
+  </div>
+</body>
+</html>

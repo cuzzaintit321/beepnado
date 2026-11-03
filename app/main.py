@@ -687,7 +687,8 @@ def ready():
 
 
 @app.get('/')
-def home():return FileResponse(ROOT/'static'/'index.html')
+def home():
+    return FileResponse(ROOT/'static'/'index.html', headers={'X-Robots-Tag': 'noindex'})
 
 
 @app.get('/static/{filename}')
