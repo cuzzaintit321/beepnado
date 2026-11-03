@@ -36,9 +36,71 @@
       <div class="bn-monitor-meta"><span>${pill(state)}</span><small>${m.last_checked ? 'Checked ' + tidy(fmt(m.last_checked)) : 'Awaiting first check'}</small></div>
       ${recentBars(m)}
       <div class="bn-monitor-metrics"><strong>${pct}</strong><small>30d checks passed</small><span>${m.response_ms == null ? '—' : num(m.response_ms) + ' ms'} latest</span></div>
-      <div class="bn-monitor-actions"><button class="bn-btn bn-btn-small" data-check="${id}" aria-label="Check ${tidy(m.name)} now">Check now</button><button class="bn-icon-btn" data-remove="${id}" aria-label="Remove ${tidy(m.name)}" title="Remove monitor">×</button></div>
+      <div class="bn-monitor-actions"><button class="bn-btn bn-btn-small bn-investigate-button" data-investigate="${id}" aria-label="Investigate ${tidy(m.name)}">Investigate ↗</button><button class="bn-btn bn-btn-small" data-check="${id}" aria-label="Check ${tidy(m.name)} now">Check now</button><button class="bn-icon-btn" data-remove="${id}" aria-label="Remove ${tidy(m.name)}" title="Remove monitor">×</button></div>
     </article>`;
   }
+
+
+  // Incident Investigator: evidence and possible causes only, never invented facts.
+  const investigatorDialog=document.createElement('dialog');
+  investigatorDialog.className='bn-investigator-dialog';
+  document.body.appendChild(investigatorDialog);
+  let copyableReport='';
+  function investigatorHint(c) {
+    if (!c) return ['No observations yet','The monitor has not recorded a check.','Run a check to collect evidence.'];
+    const err=String(c.error||''), code=Number(c.http_code||0);
+    if (/gaierror|name or service not known|dns|name resolution/i.test(err)) return ['DNS resolution','The hostname did not resolve during this check.','Check authoritative DNS and propagation.'];
+    if (/certificate verify failed|certificate has expired|SSLCertVerificationError/i.test(err)) return ['TLS certificate','The HTTPS certificate could not be validated.','Check the certificate, hostname and full chain.'];
+    if (/ssl|tls|handshake/i.test(err)) return ['HTTPS handshake','An HTTPS connection could not complete.','Inspect reverse-proxy TLS configuration and logs.'];
+    if (/ConnectionRefusedError|connection refused/i.test(err)) return ['Connection refused','The network endpoint refused the connection; it may still work externally.','Check the listening port, firewall and router NAT loopback.'];
+    if (/timed out|timeout/i.test(err)) return ['Timeout','The check exceeded its timeout.','Inspect network connectivity and server load.'];
+    if (code>=500) return ['Server-side HTTP '+code,'The endpoint returned a server error.','Check the application and upstream error logs.'];
+    if (code===401||code===403) return ['Access restriction','The endpoint returned HTTP '+code+'.','Review authentication and WAF rules.'];
+    if (code===404) return ['Missing monitored path','The endpoint returned HTTP 404. Other pages may still work.','Review the path and deployment routes.'];
+    if (code>=400) return ['HTTP '+code,'The endpoint returned a non-success response.','Inspect the application logs and requested path.'];
+    if (c.state==='up') return ['Currently responding','The latest recorded HTTP response succeeded.','Review history for intermittent failures.'];
+    return ['Unclassified failure',err||'A check failed, without enough evidence to identify the cause.','Check server logs and verify from an external network.'];
+  }
+  function investigateMonitor(m) {
+    const checks=getChecks().filter(c=>Number(c.monitor_id)===Number(m.id)).slice(0,10);
+    const latest=checks[0]||(m.last_checked?m:null);
+    const hint=investigatorHint(latest);
+    let safeUrl=String(m.url||'').split('?')[0];
+    try { const u=new URL(m.url); safeUrl=u.origin+u.pathname; } catch(e){}
+    const observed=latest?(latest.checked_at||m.last_checked):null;
+    const lines=checks.map(c=>fmt(c.checked_at)+' | '+prettyState(c.state)+' | HTTP '+(c.http_code??'—')+' | '+(c.response_ms??'—')+'ms');
+    copyableReport=[
+      'BEEPNADO INCIDENT INVESTIGATOR · Evidence-based report',
+      'Monitor: '+m.name+' · '+safeUrl,
+      'Latest state: '+(latest?prettyState(latest.state):'Not checked'),
+      'Last observed: '+(observed?fmt(observed):'No check yet'),
+      'Possible issue: '+hint[0],
+      'Observed evidence: '+hint[1],
+      'Suggested next step: '+hint[2],
+      'Recorded error: '+String(latest?.error||'None').replace(/[\r\n]/g,' ').slice(0,120),
+      'Recent checks:',...(lines.length?lines:['No observations recorded.']),
+      'Interpretation is not a confirmed root cause. Same-host checks cannot detect whole-server or Internet outages.'
+    ].join('\n');
+    const history=checks.length?checks.map(c=>
+      '<div class="bn-investigation-row"><span>'+tidy(fmt(c.checked_at))+'</span><span>'+tidy(prettyState(c.state))+'</span><span>HTTP '+tidy(c.http_code??'—')+'</span><span>'+tidy(c.response_ms==null?'—':c.response_ms+' ms')+'</span></div>').join(''):'<p>No check history yet.</p>';
+    investigatorDialog.innerHTML=
+      '<div class="bn-investigator-top"><span>REAL CHECK EVIDENCE · BEEPNADO</span><button type="button" data-investigator-close aria-label="Close">×</button></div>'+
+      '<h2>Incident Investigator</h2><p>'+tidy(m.name)+' · '+tidy(safeUrl)+'</p>'+
+      '<div class="bn-investigator-cause"><small>POSSIBLE ISSUE — NOT A CONFIRMED ROOT CAUSE</small><h3>'+tidy(hint[0])+'</h3><p>'+tidy(hint[1])+'</p><strong>What to check next</strong><p>'+tidy(hint[2])+'</p></div>'+
+      '<h3>Recent recorded checks</h3><div class="bn-investigator-history">'+history+'</div>'+
+      '<p class="bn-investigator-note">Based only on recorded observations; no simulated data. If monitoring from the same server, a total server or network outage will not be detected independently.</p>'+
+      '<div class="bn-investigator-actions"><button type="button" class="bn-btn bn-btn-primary" data-investigator-copy>Copy client report</button><button type="button" class="bn-btn bn-btn-quiet" data-investigator-close>Close</button></div>';
+    investigatorDialog.showModal();
+  }
+  investigatorDialog.addEventListener('click',async e=>{
+    const button=e.target.closest('button');
+    if(!button) return;
+    if(button.hasAttribute('data-investigator-close')) investigatorDialog.close();
+    if(button.hasAttribute('data-investigator-copy')){
+      try {await navigator.clipboard.writeText(copyableReport);toast('Report copied to clipboard');}
+      catch(e){toast('Clipboard unavailable; copy report from the investigation panel.');}
+    }
+  });
 
   function filteredMonitors() {
     return getMonitors().filter(m => {
@@ -151,6 +213,11 @@
   main?.addEventListener('click', async e => {
     const button = e.target.closest('button');
     if (!button) return;
+    if (button.hasAttribute('data-investigate')) {
+      const monitor=getMonitors().find(m=>Number(m.id)===Number(button.dataset.investigate));
+      if(monitor) investigateMonitor(monitor);
+      return;
+    }
     if (button.hasAttribute('data-bn-new')) {
       document.getElementById('bn-add-panel')?.scrollIntoView({behavior:'smooth', block:'center'});
       document.getElementById('bn-monitor-name')?.focus({preventScroll:true});
