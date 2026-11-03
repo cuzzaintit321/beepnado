@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Configure IONOS mail and enable BeepNado signup on yeet after a delivery check."""
+"""Configure IONOS or Gmail and enable BeepNado signup after a delivery check."""
 from __future__ import annotations
 
+import argparse
 import fcntl
 import getpass
 import json
@@ -125,7 +126,7 @@ def add_email_date_header(source):
     )
 
 
-def send_test_email(recipient):
+def send_test_email(recipient, provider):
     result = json.loads(compose('exec', '-T', 'web', 'python', '-c', MAIL_TEST, recipient))
     if result.get('ok'):
         return
@@ -134,7 +135,10 @@ def send_test_email(recipient):
     suffix = f', SMTP {code}' if isinstance(code, int) else ''
     message = f'SMTP test failed ({name}{suffix}).'
     if name == 'SMTPAuthenticationError':
-        message += ' Use the mailbox password. Check that the address can sign in to IONOS Webmail.'
+        if provider == 'gmail':
+            message += ' Create a Google app password for the Gmail address you entered.'
+        else:
+            message += ' Use the mailbox password. Check that the address can sign in to IONOS Webmail.'
     elif name in ('TimeoutError', 'ConnectionRefusedError', 'SMTPConnectError', 'SMTPServerDisconnected'):
         message += ' Retry once with the other SMTP port.'
     raise RuntimeError(message)
@@ -171,7 +175,7 @@ def stripe_audit():
         print('Reboot Syndicate Stripe mode could not be read.', flush=True)
 
 
-def run():
+def run(provider):
     if not sys.stdin.isatty() or not sys.stderr.isatty():
         raise RuntimeError('Run with ssh -t so the mailbox password can be entered privately.')
     if not ENV.is_file() or not (APP / 'compose.yaml').is_file() or ENV.is_symlink():
@@ -186,14 +190,21 @@ def run():
         print('Public signup and email are already enabled.')
         return
 
-    mailbox = input('Existing IONOS mailbox address: ').strip()
+    gmail = provider == 'gmail'
+    mailbox = input('Google sending email address: ' if gmail else 'Existing IONOS mailbox address: ').strip()
     recipient = input('Your email address for the delivery test: ').strip()
     if not all(EMAIL.fullmatch(address) for address in (mailbox, recipient)):
         raise RuntimeError('Enter valid email addresses.')
-    port = input('IONOS SMTP port [465, or 587]: ').strip() or '465'
+    port = input('SMTP port [465, or 587]: ').strip() or '465'
     if port not in ('465', '587'):
         raise RuntimeError('Use port 465 for SSL/TLS or 587 for STARTTLS.')
-    password = getpass.getpass('IONOS mailbox password (hidden): ')
+    password = getpass.getpass(
+        'Google app password (hidden): ' if gmail else 'IONOS mailbox password (hidden): '
+    )
+    if gmail:
+        password = password.replace(' ', '')
+        if not re.fullmatch(r'[A-Za-z0-9]{16}', password):
+            raise RuntimeError('Enter the 16-character app password for the Google sending account.')
     if not password or any(char in password for char in ('\n', '\r', '\0', '\\')):
         raise RuntimeError('This setup requires a nonempty, single-line password without backslashes.')
 
@@ -207,7 +218,7 @@ def run():
         'SITE_URL': PUBLIC,
         'SESSION_SECURE': 'true',
         'REGISTRATION_ENABLED': 'false',
-        'SMTP_HOST': 'smtp.ionos.com',
+        'SMTP_HOST': 'smtp.gmail.com' if gmail else 'smtp.ionos.com',
         'SMTP_PORT': port,
         'SMTP_USER': mailbox,
         'SMTP_PASSWORD': password,
@@ -232,7 +243,7 @@ def run():
 
         stage = 'sending the SMTP test message from the BeepNado container'
         print(f'{stage.capitalize()}…', flush=True)
-        send_test_email(recipient)
+        send_test_email(recipient, provider)
         print('SMTP accepted the test. Check your inbox and spam folder.', flush=True)
         if input('Type received once the test email arrives: ').strip().lower() != 'received':
             raise RuntimeError('Delivery was not confirmed.')
@@ -265,12 +276,15 @@ def run():
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--provider', choices=('ionos', 'gmail'), default='ionos')
+    args = parser.parse_args()
     try:
         if not APP.is_dir():
             raise RuntimeError('Run this on yeet, where ~/beepnado is installed.')
         with (APP / '.enable-signup.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            run()
+            run(args.provider)
     except (Exception, KeyboardInterrupt) as exc:
         if isinstance(exc, RuntimeError):
             print(str(exc), file=sys.stderr)
