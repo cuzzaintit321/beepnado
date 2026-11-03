@@ -124,7 +124,7 @@ async function init(){
  try{launchCapabilities=await api('/api/availability')}catch(e){console.warn('Launch status unavailable')}
  try{await refreshUser()}catch(e){console.warn('Authentication status unavailable')}
  const start=async(which='register')=>{if(signedIn){await loadDashboard()}else openAuth(which)};
- ['nav-getstarted','hero-getstarted','how-start','closing-start'].forEach(id=>$(id)?.addEventListener('click',()=>start('register')));
+ ['nav-getstarted','hero-getstarted','how-start','closing-start','investigator-start'].forEach(id=>$(id)?.addEventListener('click',()=>start('register')));
  $('nav-signin')?.addEventListener('click',()=>start('login'));
  $('account-back')?.addEventListener('click',()=>show('home'));
  $('account-swap')?.addEventListener('click',()=>openAuth(mode==='login'?'register':'login'));
