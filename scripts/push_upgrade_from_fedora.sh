@@ -8,12 +8,12 @@ ARCHIVE="$(mktemp "${TMPDIR:-/tmp}/beepnado-update.XXXXXXXX.tar.gz")"
 trap 'rm -f "$ARCHIVE"' EXIT
 cd "$ROOT"
 command -v ssh >/dev/null && command -v scp >/dev/null
-[[ -f app/main.py && -f app/bootstrap_owner.py && -f app/mail_check.py && -f app/static/app.js && -f app/static/index.html && -f app/static/monitor-theme.css && -f app/static/monitor-view.js ]] || {
+[[ -f app/main.py && -f app/bootstrap_owner.py && -f app/mail_check.py && -f app/static/app.js && -f app/static/index.html && -f app/static/monitor-theme.css && -f app/static/monitor-view.js && -f app/static/experience.js ]] || {
   echo 'Required BeepNado release files are missing.' >&2; exit 1;
 }
 python3 -m py_compile app/main.py app/bootstrap_owner.py app/mail_check.py
 if command -v node >/dev/null; then node --check app/static/app.js && node --check app/static/monitor-view.js; fi
-tar -czf "$ARCHIVE" app/main.py app/bootstrap_owner.py app/mail_check.py app/static/app.js app/static/index.html app/static/monitor-theme.css app/static/monitor-view.js
+tar -czf "$ARCHIVE" app/main.py app/bootstrap_owner.py app/mail_check.py app/static/app.js app/static/index.html app/static/monitor-theme.css app/static/monitor-view.js app/static/experience.js
 scp "$ARCHIVE" "$HOST:~/beepnado-code-update.tar.gz"
 ssh "$HOST" 'bash -s' <<'REMOTE'
 set -Eeuo pipefail
@@ -27,6 +27,9 @@ mkdir -p "$BACKUP/app/static"
 cp -p app/main.py "$BACKUP/app/main.py"
 cp -p app/static/app.js "$BACKUP/app/static/app.js"
 cp -p app/static/index.html "$BACKUP/app/static/index.html"
+for asset in monitor-theme.css monitor-view.js experience.js; do
+  if [[ -f "app/static/$asset" ]]; then cp -p "app/static/$asset" "$BACKUP/app/static/$asset"; fi
+done
 if [[ -f app/bootstrap_owner.py ]]; then cp -p app/bootstrap_owner.py "$BACKUP/app/bootstrap_owner.py"; fi
 if [[ -f app/mail_check.py ]]; then cp -p app/mail_check.py "$BACKUP/app/mail_check.py"; fi
 # Use SQLite's live backup API instead of copying an open database file.
@@ -44,6 +47,9 @@ restore(){
   cp -p "$BACKUP/app/main.py" app/main.py
   cp -p "$BACKUP/app/static/app.js" app/static/app.js
   cp -p "$BACKUP/app/static/index.html" app/static/index.html
+  for asset in monitor-theme.css monitor-view.js experience.js; do
+    if [[ -f "$BACKUP/app/static/$asset" ]]; then cp -p "$BACKUP/app/static/$asset" "app/static/$asset"; else rm -f "app/static/$asset"; fi
+  done
   if [[ -f "$BACKUP/app/bootstrap_owner.py" ]]; then cp -p "$BACKUP/app/bootstrap_owner.py" app/bootstrap_owner.py; else rm -f app/bootstrap_owner.py; fi
   if [[ -f "$BACKUP/app/mail_check.py" ]]; then cp -p "$BACKUP/app/mail_check.py" app/mail_check.py; else rm -f app/mail_check.py; fi
   docker compose up -d --build || true
