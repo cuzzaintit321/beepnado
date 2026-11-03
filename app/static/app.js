@@ -24,8 +24,29 @@ function show(which){
  $('site-footer').classList.toggle('hidden',which!=='home');
  window.scrollTo(0,0);
 }
+const signupButtons = ['nav-getstarted','hero-getstarted','how-start','closing-start','investigator-start'];
+function updateLaunchAvailability(){
+ const signup = launchCapabilities?.free_registration === true;
+ const billing = launchCapabilities?.billing === true;
+ for(const id of signupButtons){
+   const button=$(id);
+   if(button){button.disabled=!signup;button.textContent=signup?'Start free ↗':'Signup closed'}
+ }
+ document.querySelectorAll('[data-plan]').forEach(button=>{
+   const free=button.dataset.plan==='free';
+   button.disabled=free?!signup:!billing;
+   button.textContent=free?(signup?'Start free ↗':'Signup closed'):
+      (billing?(button.dataset.plan==='pro'?'Choose Pro ↗':'Choose Team ↗'):'Checkout unavailable');
+ });
+ const status=$('pricing-availability');
+ if(status)status.textContent=launchCapabilities
+   ? [signup?'Free signup is open.':'Free signup is currently closed.',
+      billing?'Paid checkout is available.':'Paid checkout is currently unavailable.'].join(' ')
+   : 'Availability could not be checked. Refresh to try again.';
+}
 function openAuth(which='register'){
- mode=which;
+ const registrationClosed=which==='register' && launchCapabilities?.free_registration!==true;
+ mode=registrationClosed?'login':which;
  const messages={
    register:['Create your free account','Start watching your websites in a few clicks.','Create account ↗'],
    login:['Welcome back','Sign in to your monitoring workspace.','Sign in ↗'],
@@ -36,6 +57,7 @@ function openAuth(which='register'){
  $('account-title').textContent=title;
  $('account-subtitle').textContent=subtitle;
  $('account-submit').textContent=submit;
+ $('account-swap').hidden=mode==='login' && launchCapabilities?.free_registration!==true;
  $('account-swap').textContent=mode==='login'||mode==='forgot'||mode==='reset'?"Don't have an account? Create one":'Already have an account? Sign in';
  $('account-password').autocomplete=mode==='login'?'current-password':'new-password';
  $('account-password').required=mode!=='forgot';
@@ -46,8 +68,8 @@ function openAuth(which='register'){
  $('account-resend').hidden=mode!=='login';
  $('account-error').textContent='';
  $('account-success').textContent='';
- if(mode==='register' && launchCapabilities?.free_registration===false)
-   $('account-error').textContent='Public registration is not open yet. Existing users can sign in.';
+ if(registrationClosed)
+   $('account-error').textContent='Public signup is currently closed. Existing customers can sign in.';
  show('auth');
 }
 async function refreshUser(){
@@ -58,6 +80,7 @@ async function loadDashboard(){
  await refreshUser();
  if(!signedIn){openAuth('login');return}
  dash=await api('/api/dashboard');
+ try{launchCapabilities=await api('/api/availability')}catch(e){launchCapabilities=null}
  if(!dash.monitors.length) view='monitors';
  $('user-chip').textContent=user.email+' · '+user.plan.toUpperCase();
  show('workspace');renderView();
@@ -102,7 +125,7 @@ function statusSettings(){
 }
 function billing(){
  const list=[['free','Free','$0','2 monitors / 5-minute checks'],['pro','Pro','$12','20 monitors / 1-minute checks'],['team','Team','$39','100 monitors / 1-minute checks']];
- $('work-content').innerHTML=`<div class="panel"><h3>Your account</h3><p><strong>${esc(user.email)}</strong> · ${pill('up')} <span class="small-muted">Current plan: ${esc(user.plan.toUpperCase())}</span></p><p class="billing-note">Your plan controls the number of monitors and primary check interval. Paid billing opens only if Stripe prices and webhooks are configured. Payment cannot be activated by a browser redirect alone.</p></div><div class="pricing-grid section-spaced">${list.map(([id,label,price,description])=>`<div class="price-card"><div class="plan-tag">${esc(label.toUpperCase())}</div><div class="price">${price}<span>/mo</span></div><p>${esc(description)}</p><button class="btn ${id===user.plan?'btn-outline-dark':'btn-accent'}" data-bill-plan="${id}" ${id===user.plan || (id!=='free'&&!launchCapabilities?.billing)?'disabled':''}>${id===user.plan?'Current plan':id==='free'?'Free tier':launchCapabilities?.billing?'Subscribe ↗':'Planned tier'}</button></div>`).join('')}</div>${user.stripe_customer?'<div class="panel section-spaced"><button class="work-btn" id="billing-portal">Manage billing in Stripe ↗</button></div>':''}<p class="billing-note">Prices are proposed. No paid plan is available until a real Stripe account is configured and tested. Cancel or change existing subscriptions in Stripe Billing.</p>`;
+ $('work-content').innerHTML=`<div class="panel"><h3>Your account</h3><p><strong>${esc(user.email)}</strong> · ${pill('up')} <span class="small-muted">Current plan: ${esc(user.plan.toUpperCase())}</span></p><p class="billing-note">Your plan controls the number of monitors and primary check interval. Paid billing opens only if Stripe prices and webhooks are configured. Payment cannot be activated by a browser redirect alone.</p></div><div class="pricing-grid section-spaced">${list.map(([id,label,price,description])=>`<div class="price-card"><div class="plan-tag">${esc(label.toUpperCase())}</div><div class="price">${price}<span>/mo</span></div><p>${esc(description)}</p><button class="btn ${id===user.plan?'btn-outline-dark':'btn-accent'}" data-bill-plan="${id}" ${id===user.plan || (id!=='free'&&!launchCapabilities?.billing)?'disabled':''}>${id===user.plan?'Current plan':id==='free'?'Free tier':launchCapabilities?.billing?'Subscribe ↗':'Planned tier'}</button></div>`).join('')}</div>${user.stripe_customer&&launchCapabilities?.billing?'<div class="panel section-spaced"><button class="work-btn" id="billing-portal">Manage billing in Stripe ↗</button></div>':''}<p class="billing-note">Manage an existing paid subscription in Stripe Billing.</p>`;
  $('billing-portal')?.addEventListener('click',async()=>{try{const data=await api('/api/billing/portal',{method:'POST'});location.href=data.url}catch(e){toast(e.message)}});
 }
 async function openCheckout(plan){
@@ -124,7 +147,8 @@ async function init(){
  try{launchCapabilities=await api('/api/availability')}catch(e){console.warn('Launch status unavailable')}
  try{await refreshUser()}catch(e){console.warn('Authentication status unavailable')}
  const start=async(which='register')=>{if(signedIn){await loadDashboard()}else openAuth(which)};
- ['nav-getstarted','hero-getstarted','how-start','closing-start','investigator-start'].forEach(id=>$(id)?.addEventListener('click',()=>start('register')));
+ updateLaunchAvailability();
+ signupButtons.forEach(id=>$(id)?.addEventListener('click',()=>start('register')));
  $('nav-signin')?.addEventListener('click',()=>start('login'));
  $('account-back')?.addEventListener('click',()=>show('home'));
  $('account-swap')?.addEventListener('click',()=>openAuth(mode==='login'?'register':'login'));
@@ -164,7 +188,7 @@ async function init(){
    }catch(err){$('account-error').textContent=err.message}
  });
  document.querySelectorAll('.side-link').forEach(e=>e.addEventListener('click',()=>selectView(e.dataset.view)));
- $('signout')?.addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});user=null;signedIn=false;dash=null;show('home');toast('Signed out')}catch(e){toast(e.message)}});
+ $('signout')?.addEventListener('click',async()=>{try{await api('/api/logout',{method:'POST'});user=null;signedIn=false;dash=null;try{launchCapabilities=await api('/api/availability')}catch(e){launchCapabilities=null}updateLaunchAvailability();show('home');toast('Signed out')}catch(e){toast(e.message)}});
  $('work-content').addEventListener('click',async e=>{
    const b=e.target.closest('button');if(!b)return;
    if(b.dataset.view){selectView(b.dataset.view);return}
@@ -183,8 +207,9 @@ async function init(){
    history.replaceState(null,'',location.pathname+location.search);
    openAuth('reset');
  }else if(location.search.includes('signin'))openAuth('login');
- else if(location.search.includes('signup')){openAuth('register');if(launchCapabilities?.free_registration===false){$('account-error').textContent='Free signup is not open yet. Email verification must be configured first.'}}
- else if(signedIn){await loadDashboard()}else show('home');
+ else if(new URLSearchParams(location.search).has('signup') || new URLSearchParams(location.search).has('start'))await start('register');
+ else if(signedIn){await loadDashboard();if(hash==='#pricing')selectView('billing')}
+ else {show('home');if(hash==='#pricing')$('pricing')?.scrollIntoView()}
 }
 // Refresh read-only monitoring views automatically while the workspace is open.
 setInterval(async()=>{

@@ -46,6 +46,7 @@ SMTP_STARTTLS = os.getenv('SMTP_STARTTLS', 'true').lower() == 'true'
 TRUSTED_PROXY_IP = os.getenv('TRUSTED_PROXY_IP', '').strip()
 STRIPE_KEY = os.getenv('STRIPE_SECRET_KEY', '')
 STRIPE_SIGNING = os.getenv('STRIPE_WEBHOOK_SECRET', '')
+STRIPE_TEST_EMAIL = os.getenv('STRIPE_TEST_EMAIL', '').strip().lower()
 PRICE_IDS = {'pro': os.getenv('STRIPE_PRICE_PRO',''), 'team': os.getenv('STRIPE_PRICE_TEAM','')}
 PLAN_LIMITS = {'free': 2, 'pro': 20, 'team': 100}
 PLAN_INTERVALS = {'free': 300, 'pro': 60, 'team': 60}
@@ -466,12 +467,21 @@ async def headers(request: Request, call_next):
     return response
 
 
+def billing_allowed(user):
+    if not (STRIPE_SIGNING and all(PRICE_IDS.values())):
+        return False
+    if STRIPE_KEY.startswith(('sk_live_', 'rk_live_')):
+        return True
+    return bool(STRIPE_KEY.startswith(('sk_test_', 'rk_test_')) and STRIPE_TEST_EMAIL
+                and user and user['email_verified_at'] and user['email'] == STRIPE_TEST_EMAIL)
+
+
 @app.get('/api/availability')
-def public_availability():
-    # This endpoint intentionally reveals only launch capabilities, never credentials.
-    return {'free_registration':bool(REGISTRATION_ENABLED and email_ready()),
-            'billing':bool(STRIPE_KEY and STRIPE_SIGNING and all(PRICE_IDS.values())),
-            'email':email_ready()}
+def public_availability(request: Request):
+    # Test checkout is only advertised to the configured, signed-in test account.
+    return {'free_registration': bool(REGISTRATION_ENABLED and email_ready()),
+            'billing': billing_allowed(session_user(request)),
+            'email': email_ready()}
 
 
 @app.get('/health')
@@ -742,14 +752,17 @@ class CheckoutInput(BaseModel):
 
 @app.post('/api/billing/checkout')
 def checkout(input:CheckoutInput,user=Depends(require_csrf)):
-    if input.plan not in ('pro','team') or not PRICE_IDS.get(input.plan):raise HTTPException(422,'Paid plan not configured')
+    if not billing_allowed(user):
+        raise HTTPException(503, 'Paid checkout is unavailable')
+    if input.plan not in ('pro','team'):
+        raise HTTPException(422, 'Unknown paid plan')
     stripe=get_stripe()
     if user['stripe_customer'] and user['subscription_status'] in ('active','trialing','past_due'):
         raise HTTPException(409,'Manage your existing subscription in billing')
     params={'mode':'subscription','line_items':[{'price':PRICE_IDS[input.plan],'quantity':1}],
             'success_url':SITE_URL+'/?billing=return','cancel_url':SITE_URL+'/?billing=cancel',
-            'client_reference_id':str(user['id']),'metadata':{'user_id':str(user['id']),'plan':input.plan},
-            'subscription_data':{'metadata':{'user_id':str(user['id']),'plan':input.plan}}}
+            'client_reference_id':str(user['id']),
+            'subscription_data':{'metadata':{'beepnado_user_id':str(user['id'])}}}
     if user['stripe_customer']:params['customer']=user['stripe_customer']
     else: params['customer_email']=user['email']
     try:return {'url':stripe.checkout.Session.create(**params).url}
@@ -758,44 +771,66 @@ def checkout(input:CheckoutInput,user=Depends(require_csrf)):
 
 @app.post('/api/billing/portal')
 def portal(user=Depends(require_csrf)):
+    if not billing_allowed(user):
+        raise HTTPException(503, 'Billing portal is unavailable')
     if not user['stripe_customer']:raise HTTPException(404,'No paid subscription account')
     stripe=get_stripe()
     try:return {'url':stripe.billing_portal.Session.create(customer=user['stripe_customer'],return_url=SITE_URL+'/').url}
     except Exception as exc:raise HTTPException(502,'Unable to open billing portal') from exc
 
 
+SUBSCRIPTION_EVENTS = frozenset({
+    'customer.subscription.created', 'customer.subscription.updated', 'customer.subscription.deleted',
+})
+
+
 @app.post('/stripe/webhook')
-async def stripe_webhook(request:Request):
-    stripe=get_stripe()
-    payload=await request.body()
-    signature=request.headers.get('stripe-signature','')
-    try:event=stripe.Webhook.construct_event(payload,signature,STRIPE_SIGNING)
-    except Exception as exc:raise HTTPException(400,'Stripe webhook signature invalid') from exc
-    event_id=event['id']; event_type=event['type']; obj=event['data']['object']
+async def stripe_webhook(request: Request):
+    stripe = get_stripe()
+    payload = await request.body()
+    signature = request.headers.get('stripe-signature', '')
+    try:
+        event = stripe.Webhook.construct_event(payload, signature, STRIPE_SIGNING)
+    except Exception as exc:
+        raise HTTPException(400, 'Stripe webhook signature invalid') from exc
+    if (event['type'] not in SUBSCRIPTION_EVENTS
+            or event.get('livemode') != STRIPE_KEY.startswith(('sk_live_', 'rk_live_'))):
+        return {'ok': True}
+
+    sub = event['data']['object']
+    customer, subscription = sub.get('customer'), sub.get('id')
+    if not customer or not subscription:
+        return {'ok': True}
+
+    uid = (sub.get('metadata') or {}).get('beepnado_user_id')
+    items = (sub.get('items') or {}).get('data', [])
+    price = (items[0].get('price') or {}).get('id') if len(items) == 1 else None
+    plan = next((name for name, price_id in PRICE_IDS.items() if price_id and price_id == price), None)
+    status = 'canceled' if event['type'] == 'customer.subscription.deleted' else sub.get('status')
     with db() as c:
-        if c.execute('SELECT 1 FROM billing_events WHERE event_id=?',(event_id,)).fetchone():return {'ok':True}
-        if event_type=='checkout.session.completed' and obj.get('mode')=='subscription':
-            # Establish linkage only; never grant paid entitlement until subscription status is verified.
-            uid=obj.get('client_reference_id')
-            if uid and str(uid).isdigit():
-                c.execute('UPDATE users SET stripe_customer=?,stripe_subscription=? WHERE id=? AND (stripe_customer IS NULL OR stripe_customer=?)',
-                          (obj.get('customer'),obj.get('subscription'),int(uid),obj.get('customer')))
-        elif event_type in ('customer.subscription.created','customer.subscription.updated','customer.subscription.deleted'):
-            metadata=obj.get('metadata') or {}; uid=metadata.get('user_id'); plan=metadata.get('plan')
-            customer=obj.get('customer'); subscription=obj.get('id'); status_value=obj.get('status')
-            if uid and str(uid).isdigit() and plan in ('pro','team') and customer:
-                plan_value=plan if status_value in ('active','trialing') and event_type!='customer.subscription.deleted' else 'free'
-                c.execute('''UPDATE users SET plan=?,subscription_status=?,stripe_customer=?,stripe_subscription=?
-                             WHERE id=? AND (stripe_customer IS NULL OR stripe_customer=?)''',
-                          (plan_value,status_value,customer,subscription,int(uid),customer))
-            elif customer:
-                row=c.execute('SELECT id FROM users WHERE stripe_customer=?',(customer,)).fetchone()
-                if row:
-                    plan_value=plan if status_value in ('active','trialing') and plan in ('pro','team') else 'free'
-                    c.execute('UPDATE users SET plan=?,subscription_status=?,stripe_subscription=? WHERE id=?',
-                              (plan_value,status_value,subscription,row['id']))
-        c.execute('INSERT INTO billing_events(event_id,processed_at) VALUES(?,?)',(event_id,now()))
-    return {'ok':True}
+        c.execute('BEGIN IMMEDIATE')
+        if c.execute('SELECT 1 FROM billing_events WHERE event_id=?', (event['id'],)).fetchone():
+            return {'ok': True}
+        user = c.execute(
+            'SELECT * FROM users WHERE stripe_customer=? AND stripe_subscription=?',
+            (customer, subscription),
+        ).fetchone()
+        if user is None and uid and str(uid).isascii() and str(uid).isdigit() and len(str(uid)) <= 18 and plan:
+            user = c.execute(
+                '''SELECT * FROM users WHERE id=? AND (stripe_customer IS NULL OR stripe_customer=?)
+                   AND (stripe_subscription IS NULL OR subscription_status IN ('canceled', 'incomplete_expired'))''',
+                (int(uid), customer),
+            ).fetchone()
+        if user and billing_allowed(user):
+            if user['stripe_subscription'] == subscription and user['subscription_status'] == 'canceled':
+                return {'ok': True}
+            active_plan = plan if plan and status in ('active', 'trialing') else 'free'
+            c.execute(
+                'UPDATE users SET plan=?,subscription_status=?,stripe_customer=?,stripe_subscription=? WHERE id=?',
+                (active_plan, status, customer, subscription, user['id']),
+            )
+            c.execute('INSERT INTO billing_events(event_id,processed_at) VALUES(?,?)', (event['id'], now()))
+    return {'ok': True}
 
 
 @app.get('/internal/targets')
