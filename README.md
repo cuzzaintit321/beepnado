@@ -10,6 +10,19 @@
 
 > **Launch status:** Beta release candidate. Public registration is disabled until email verification is configured; Stripe billing is not yet active.
 
+## Dark monitoring workspace (v3)
+
+BeepNado's signed-in monitoring UI now uses a compact dark operations layout inspired by modern uptime dashboards while preserving its own branding. It includes searchable/filterable monitors, recent check tick bars **only where actual check records exist**, up/down/pending totals, 30-day check-success statistics, manual checks, monitor creation, and access to incident history and status pages.
+
+**Update an existing deployment** (from Fedora with SSH to `yeet`):
+
+```bash
+git -C ~/beepnado-launch pull --ff-only
+bash ~/beepnado-launch/scripts/push_upgrade_from_fedora.sh
+```
+
+The UI update uses `app/static/monitor-theme.css` and `app/static/monitor-view.js`. It does not change the SQLite schema, `.env` secrets, the public marketing website, or the Caddy configuration. The self-host monitoring workaround for domains on `yeet` still requires the separate `scripts/fix_local_monitor.sh` configuration when applicable. Same-host checks cannot independently detect whole-server or home-Internet outages.
+
 ## Get your own monitoring dashboard working now
 
 The deployed BeepNado app is reachable at **https://app.beepnado.com**. Public registration remains closed until verified SMTP is set up, but the server operator can activate an owner account without opening public registration.
