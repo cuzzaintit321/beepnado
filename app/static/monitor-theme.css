@@ -169,3 +169,6 @@
 .bn-investigator-explain p{color:#abbfd2;margin:0}
 .bn-investigator-explain .case-note{font-size:11px;color:#7993a7;border-top:1px solid #304156;padding-top:16px;margin-top:20px}
 @media(max-width:840px){.bn-investigator-teaser{grid-template-columns:1fr;padding:70px 24px;gap:24px}.bn-investigator-dialog{padding:20px}.bn-investigator-actions button{flex:1}}
+
+/* FAQ was removed from marketing; hide any stale injected copy from cached scripts. */
+#faq,.beep-faq{display:none!important}
