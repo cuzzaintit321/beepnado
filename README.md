@@ -10,6 +10,42 @@
 
 > **Launch status:** Beta release candidate. Public registration is disabled until email verification is configured; Stripe billing is not yet active.
 
+## Get your own monitoring dashboard working now
+
+The deployed BeepNado app is reachable at **https://app.beepnado.com**. Public registration remains closed until verified SMTP is set up, but the server operator can activate an owner account without opening public registration.
+
+On **Fedora xps-8930** (requires authenticated GitHub CLI and SSH access to `yeet`):
+
+```bash
+gh repo clone cuzzaintit321/beepnado ~/beepnado-launch
+cd ~/beepnado-launch
+bash scripts/push_upgrade_from_fedora.sh
+```
+
+This targeted update snapshots the persistent SQLite database, backs up the app files, rebuilds **only BeepNado**, and checks `/health/ready`. It does **not** replace `.env`, delete the Docker volume, or reconfigure Caddy/your other websites.
+
+Then create your own verified Free account locally (password is entered interactively, never on the command line):
+
+```bash
+ssh -t yeet 'cd ~/beepnado && docker compose exec web python -m app.bootstrap_owner'
+```
+
+Sign in at **https://app.beepnado.com/?signin=1**, add a public URL you own/are authorized to monitor, click **Check**, and create a public status page. Existing email accounts remain intact; the bootstrap command refuses to overwrite an already-verified account. The dashboard shows check-based 30-day success percentages **only when real samples exist**, not fabricated uptime or an SLA.
+
+### Open limited public beta registration (after email is tested)
+
+In `~/beepnado/.env` on **yeet**, configure SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, SMTP_FROM and the appropriate TLS options. Keep `REGISTRATION_ENABLED=false` until you verify delivery:
+
+```bash
+cd ~/beepnado
+docker compose up -d --force-recreate
+docker compose exec web python -m app.mail_check
+```
+
+After the test email arrives and the full verification/password-recovery loop passes, change `REGISTRATION_ENABLED=true`, rebuild or recreate the app, and test a fresh account. Never share the SMTP password in a chat or commit it to GitHub.
+
+**Paid plans remain unavailable:** Stripe live payments, webhook events, cancellation/upgrade flows, tax obligations, a tested off-site monitor, and independent security review are still outstanding. Do not advertise 24/7 alert guarantees on a single home server.
+
 ## What's implemented and tested
 
 - Existing HTTP(S) monitoring, HTTPS certificate expiry visibility, incident and recovery records, in-app notifications and shareable status pages.
@@ -55,7 +91,7 @@ Keep `@`, `www`, MX, TXT, and email records as they are. Since your home router 
 Check app HTTPS **from `yeet`** independent of router loopback:
 
 ```bash
-curl -fI --resolve app.beepnado.com:443:127.0.0.1 https://app.beepnado.com/
+curl -fsS -o /dev/null -w 'HTTP %{http_code}\n' --resolve app.beepnado.com:443:127.0.0.1 https://app.beepnado.com/
 ```
 
 The public marketing site stays at `https://beepnado.com` and the account app will be at `https://app.beepnado.com` once DNS is propagated. Both use Caddy automatic HTTPS.
@@ -94,7 +130,7 @@ cd ~/beepnado
 docker compose ps
 docker compose logs --tail=80 web
 curl -fsS http://127.0.0.1:8490/health
-curl -fI --resolve app.beepnado.com:443:127.0.0.1 https://app.beepnado.com/
+curl -fsS -o /dev/null -w 'HTTP %{http_code}\n' --resolve app.beepnado.com:443:127.0.0.1 https://app.beepnado.com/
 docker logs jason-portfolio --tail 60
 ```
 
@@ -113,4 +149,4 @@ node --check app/static/app.js
 node --check app/static/experience.js
 ```
 
-The development environment ran **14 tests** successfully; the interactive marketing layer passed desktop/mobile browser DOM tests. A Docker image was *not* built and the installer has not been executed against the live `yeet` server from this chat.
+The development environment ran **18 backend tests** successfully; the interactive marketing layer passed desktop/mobile browser DOM tests. A Docker image was *not* built and the installer has not been executed against the live `yeet` server from this chat.
