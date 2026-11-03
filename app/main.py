@@ -14,6 +14,7 @@ import os
 import re
 import smtplib
 from email.message import EmailMessage
+from email.utils import formatdate
 import secrets
 import socket
 import sqlite3
@@ -181,6 +182,7 @@ def send_email(recipient: str, subject: str, content: str):
     msg['From']=SMTP_FROM
     msg['To']=recipient
     msg['Subject']=subject
+    msg['Date'] = formatdate(usegmt=True)
     msg.set_content(content)
     if SMTP_SSL:
         server=smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=12, context=ssl.create_default_context())
