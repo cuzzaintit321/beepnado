@@ -31,14 +31,5 @@ for(const [selector,items] of [['.feature-card',detail],['.price-card',plans]]){
   el.addEventListener('keydown',e=>{if(e.target===el && (e.key==='Enter'||e.key===' ')){e.preventDefault();open(items[i])}});
  });
 }
-const faq=document.createElement('section');faq.className='beep-faq';faq.id='faq';
-const qs=[
-['Is the monitoring real?','Yes, after signup. The authenticated dashboard displays actual HTTP observations. The Incident Investigator organizes real recorded observations without inventing uptime data.'],
-['Can I use BeepNado for free?','The free tier supports two monitors. Public registration opens after verification email delivery has been configured and tested.'],
-['Can I buy Pro or Team now?','Not yet. Paid tiers are proposed. Stripe billing must pass test payments and webhook verification first.'],
-['Will BeepNado fix my website?','No. It detects and records downtime. Monitoring is not automated repair or a guaranteed uptime SLA.']
-];
-faq.innerHTML='<h2>Frequently asked questions</h2>';
-for(const [question,answer] of qs){const d=document.createElement('details');const summary=document.createElement('summary');summary.textContent=question;const p=document.createElement('p');p.textContent=answer;d.append(summary,p);faq.appendChild(d)}
-document.getElementById('pricing')?.after(faq);
+// FAQ section intentionally removed from BeepNado marketing site.
 })();
