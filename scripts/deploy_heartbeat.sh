@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Apply the heartbeat and HTTP check rules release on yeet and verify it through the existing proxy.
+# Apply the monitoring release on yeet and verify it through the existing proxy.
 set -Eeuo pipefail
 release="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 app="$HOME/beepnado"
@@ -23,22 +23,72 @@ expect_release_file() {
     return 1
 }
 
-expect_release_file app/main.py 463d79e4917dab6a5874dc9a56081a997186bf3a486204f8a73475047bd62c3c 0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1 b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e
-expect_release_file app/static/monitor-view.js d7569b521cb79c9bea42afdfb0f043c97b8f0fdcdda7f76c53e65a8518af72b6 a2997738a91b875bccf9709ff7638e5ed510b9947bbc44a3f4aebd4e5a65deae 4a165fd2c214fa63496f7fa6721b5bd1a00ccb65de529c50d234ea23f5e8f00e
+expect_release_file app/main.py 463d79e4917dab6a5874dc9a56081a997186bf3a486204f8a73475047bd62c3c 0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1 b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e 8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676
+expect_release_file app/static/monitor-view.js d7569b521cb79c9bea42afdfb0f043c97b8f0fdcdda7f76c53e65a8518af72b6 a2997738a91b875bccf9709ff7638e5ed510b9947bbc44a3f4aebd4e5a65deae 4a165fd2c214fa63496f7fa6721b5bd1a00ccb65de529c50d234ea23f5e8f00e 4fcefd3fddef0046279c0733450466b0377f5553d679eb9d9f57c5c7b588014f
 expect_release_file requirements.txt c7b3d34378d337125cc58d87dd542b70322cffac63339196e5c23cdfeb9c9cef ab59b5f98e5e75669346e0f877691470741461658fdaee164162ac885ebc8be4
 
 staged_main="$state/release/app/main.py"
 if [[ -f "$staged_main" ]] && ! cmp -s "$staged_main" "$release/app/main.py"; then
     read -r staged_digest _ < <(sha256sum -- "$staged_main")
     case "$staged_digest" in
-        0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1|b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e) ;;
+        0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1|b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e|8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676) ;;
         *) echo 'Existing paid release was modified. Review before updating.' >&2; exit 1 ;;
     esac
 fi
 
-backup="$(mktemp -d "$state/heartbeat-backup.XXXXXXXX")"
-files=(app/main.py app/static/monitor-view.js app/static/monitor-theme.css requirements.txt)
+backup="$(mktemp -d "$state/monitoring-backup.XXXXXXXX")"
+files=(app/main.py app/static/app.js app/static/monitor-view.js app/static/monitor-theme.css requirements.txt)
 cp -p --parents -- "${files[@]}" "$backup"
+# Patch only the status rendering in app.js, preserving locally deployed billing and signup behavior.
+patch_file="$backup/public-status.patch"
+cat >"$patch_file" <<'PUBLIC_STATUS_PATCH'
+--- a/app/static/app.js
++++ b/app/static/app.js
+@@ -6,3 +6,3 @@
+ const dateOnly = value => value ? new Date(value).toLocaleDateString() : '—';
+-const prettyState = s => s==='up'?'Operational':s==='down'?'Down':s==='degraded'?'Unconfirmed failure':'Awaiting first check';
++const prettyState = s => s==='up'?'Operational':s==='down'?'Down':s==='degraded'?'Unconfirmed failure':s==='maintenance'?'Maintenance':'Awaiting check';
+ const pill = state => `<span class="status-pill status-${esc(state)}">● ${prettyState(state)}</span>`;
+@@ -151,7 +151,20 @@
+ async function renderPublicStatus(slug){
+- show('status');
+  try{
+    const s=await api('/api/public-status/'+encodeURIComponent(slug));
+-   const bad=s.monitors.some(m=>m.state==='down');const pending=s.monitors.some(m=>m.state!=='up');
+-   $('status-body').innerHTML=`<span class="kicker">SERVICE HEALTH</span><h1>${esc(s.title)}</h1><p>Last loaded: ${fmt(s.observed_at)}</p><div class="status-banner ${bad?'alert':''}">${bad?'● One or more services are currently reporting downtime':pending?'◌ Some services have not confirmed a healthy state':'✓ All monitored services are operational'}</div><div class="panel"><h3>Services</h3>${s.monitors.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Status</th><th>Last checked</th></tr></thead><tbody>${s.monitors.map(m=>`<tr><td><strong>${esc(m.name)}</strong></td><td>${pill(m.state)}</td><td>${fmt(m.last_checked)}</td></tr>`).join('')}</tbody></table></div>`:empty('No public services listed','The account has not added a monitor.')}</div><div class="panel"><h3>Recent incidents</h3>${s.incidents.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Opened</th><th>Recovered</th></tr></thead><tbody>${s.incidents.map(i=>`<tr><td>${esc(i.monitor)}</td><td>${fmt(i.opened_at)}</td><td>${i.resolved_at?fmt(i.resolved_at):'Ongoing'}</td></tr>`).join('')}</tbody></table></div>`:empty('No incidents recorded','This page only displays incidents already observed by the monitor.')}</div><p class="billing-note">Displayed values reflect the most recent primary-region HTTP(S) observations, not a guaranteed SLA.</p>`;
++   const bad=s.monitors.some(m=>m.state==='down');
++   const maintenance=s.monitors.some(m=>m.state==='maintenance');
++   const pending=s.monitors.some(m=>!['up','maintenance'].includes(m.state));
++   const message=bad?'● One or more services are currently reporting downtime'
++     :maintenance?'◌ Planned maintenance is in progress'
++     :pending?'◌ Some services have not confirmed a healthy state':'✓ All monitored services are operational';
++   const rows = s.monitors.map(m => {
++     const window = m.maintenance;
++     const schedule = window && (m.state === 'maintenance'
++       ? 'Ends ' + fmt(window.ends_at)
++       : 'Scheduled ' + fmt(window.starts_at) + ' to ' + fmt(window.ends_at));
++     return `<tr><td><strong>${esc(m.name)}</strong></td>
++       <td>${pill(m.state)}${schedule ? '<div class="small-muted">' + esc(schedule) + '</div>' : ''}</td>
++       <td>${fmt(m.last_checked)}</td></tr>`;
++   }).join('');
++   $('status-body').innerHTML=`<span class="kicker">SERVICE HEALTH</span><h1>${esc(s.title)}</h1><p>Last loaded: ${fmt(s.observed_at)}</p><div class="status-banner ${bad?'alert':''}">${message}</div><div class="panel"><h3>Services</h3>${s.monitors.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Status</th><th>Last checked</th></tr></thead><tbody>${rows}</tbody></table></div>`:empty('No public services listed','The account has not added a monitor.')}</div><div class="panel"><h3>Recent incidents</h3>${s.incidents.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Opened</th><th>Recovered</th></tr></thead><tbody>${s.incidents.map(i=>`<tr><td>${esc(i.monitor)}</td><td>${fmt(i.opened_at)}</td><td>${i.resolved_at?fmt(i.resolved_at):'Ongoing'}</td></tr>`).join('')}</tbody></table></div>`:empty('No incidents recorded','This page only displays incidents already observed by the monitor.')}</div><p class="billing-note">Displayed values reflect the latest recorded monitor observations.</p>`;
+  }catch(e){$('status-body').innerHTML=`<h1>Status page unavailable</h1><p>${esc(e.message)}</p>`}
+@@ -160,3 +173,8 @@
+  const statusMatch=location.pathname.match(/^\/s\/([a-z0-9-]+)$/);
+- if(statusMatch){await renderPublicStatus(statusMatch[1]);return}
++ if(statusMatch){
++   show('status');
++   await renderPublicStatus(statusMatch[1]);
++   setInterval(()=>{if(!document.hidden)renderPublicStatus(statusMatch[1]);},30000);
++   return;
++ }
+  try{launchCapabilities=await api('/api/availability')}catch(e){console.warn('Launch status unavailable')}
+PUBLIC_STATUS_PATCH
+patch_app=false
+if ! git apply --reverse --check "$patch_file" 2>/dev/null; then
+    git apply --check "$patch_file" || { echo 'Local status-page changes require review.' >&2; exit 1; }
+    patch_app=true
+fi
 if [[ -f "$staged_main" ]]; then
     cp -p -- "$staged_main" "$backup/staged-main.py"
 fi
@@ -61,7 +111,7 @@ with tempfile.TemporaryDirectory() as tmp:
     with path.open("rb") as data:
         import shutil
         shutil.copyfileobj(data, sys.stdout.buffer)
-' >"$backup/before-heartbeat.sqlite3"
+' >"$backup/before-monitoring.sqlite3"
 
 rollback() {
     trap - ERR INT TERM
@@ -72,11 +122,12 @@ rollback() {
     exit 1
 }
 trap rollback ERR INT TERM
+if [[ "$patch_app" == true ]]; then git apply "$patch_file"; fi
 cp -- "$release/app/main.py" app/main.py
 cp -- "$release/app/static/monitor-view.js" app/static/monitor-view.js
 cp -- "$release/requirements.txt" requirements.txt
 # Preserve local styling by appending each missing section.
-for marker in '/* Configurable check rules */' '/* Heartbeat monitors */'; do
+for marker in '/* Configurable check rules */' '/* Heartbeat monitors */' '/* Planned maintenance */'; do
     if ! grep -Fxq "$marker" app/static/monitor-theme.css; then
         printf '\n' >> app/static/monitor-theme.css
         awk -v marker="$marker" '
@@ -91,6 +142,8 @@ docker compose up -d --build --no-deps --wait --wait-timeout 90 web
 caddy /health/ready >/dev/null
 status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 12 --resolve app.beepnado.com:443:127.0.0.1 -X POST https://app.beepnado.com/api/heartbeat)"
 [[ "$status" == 401 ]]
+caddy /static/app.js >"$backup/served-app.js"
+cmp app/static/app.js "$backup/served-app.js"
 caddy /static/monitor-view.js >"$backup/served-monitor-view.js"
 cmp app/static/monitor-view.js "$backup/served-monitor-view.js"
 caddy /static/monitor-theme.css >"$backup/served-monitor-theme.css"
@@ -100,11 +153,12 @@ cmp "$backup/availability.json" "$backup/after-availability.json"
 docker compose exec -T web python -c '
 from app.main import db
 with db() as c:
-    c.execute("SELECT required_phrase, expected_status, max_response_ms, heartbeat_due_at FROM monitors LIMIT 1")
+    c.execute("SELECT required_phrase, expected_status, max_response_ms, heartbeat_due_at, maintenance_last_checked FROM monitors LIMIT 1")
+    c.execute("SELECT id FROM maintenance_windows LIMIT 1")
 '
 if [[ -f "$staged_main" ]]; then
     cp -- "$release/app/main.py" "$staged_main"
 fi
 trap - ERR INT TERM
-echo 'Heartbeat monitors and check rules deployed and verified through Caddy.'
+echo 'Maintenance windows, heartbeat monitors, and check rules deployed and verified through Caddy.'
 echo "Backup: $backup"

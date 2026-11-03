@@ -7,45 +7,52 @@
   const num = (v) => Number.isFinite(Number(v)) ? Number(v) : 0;
   const tidy = (v) => esc(String(v ?? ''));
 
+  const statusOf = m => m.display_state || m.state || 'pending';
+
   function counts() {
     const monitors = getMonitors();
     return {
       total: monitors.length,
-      up: monitors.filter(m => m.state === 'up').length,
-      down: monitors.filter(m => m.state === 'down').length,
-      degraded: monitors.filter(m => m.state === 'degraded').length,
-      pending: monitors.filter(m => !m.last_checked).length
+      up: monitors.filter(m => statusOf(m) === 'up').length,
+      down: monitors.filter(m => statusOf(m) === 'down').length,
+      degraded: monitors.filter(m => statusOf(m) === 'degraded').length,
+      pending: monitors.filter(m => statusOf(m) === 'pending').length,
+      maintenance: monitors.filter(m => statusOf(m) === 'maintenance').length
     };
   }
 
   function recentBars(m) {
     const checks = getChecks().filter(c => Number(c.monitor_id) === Number(m.id)).slice(0, 24).reverse();
     const gaps = Math.max(0, 24 - checks.length);
+    const maintenance = checks.filter(c => c.region === 'maintenance').length;
     const bars = '<span class="bn-tick bn-empty" aria-hidden="true"></span>'.repeat(gaps) +
-      checks.map(c => `<span class="bn-tick bn-${['up','down','degraded'].includes(c.state) ? c.state : 'empty'}" title="${tidy(fmt(c.checked_at))}: ${tidy(prettyState(c.state))}" aria-hidden="true"></span>`).join('');
-    return `<div class="bn-history"><div class="bn-history-bars" role="img" aria-label="${checks.length} recent recorded checks for ${tidy(m.name)}">${bars}</div><span class="bn-history-caption">${checks.length ? checks.length + ' recent checks' : 'No checks yet'}</span></div>`;
+      checks.map(c => `<span class="bn-tick bn-${['up','down','degraded'].includes(c.state) ? c.state : 'empty'}${c.region === 'maintenance' ? ' bn-planned-tick' : ''}" title="${tidy(fmt(c.checked_at))}: ${tidy(prettyState(c.state))}${c.region === 'maintenance' ? ' · planned maintenance' : ''}" aria-hidden="true"></span>`).join('');
+    return `<div class="bn-history"><div class="bn-history-bars" role="img" aria-label="${checks.length} recent recorded checks for ${tidy(m.name)}${maintenance ? ', ' + maintenance + ' during maintenance' : ''}">${bars}</div><span class="bn-history-caption">${checks.length ? checks.length + ' recent checks' : 'No checks yet'}${maintenance ? ' · ' + maintenance + ' planned' : ''}</span></div>`;
   }
 
   function monitorItem(m) {
-    const state = m.last_checked ? (m.state || 'pending') : 'pending';
+    const state = statusOf(m);
+    const window = m.maintenance;
+    const notice = window ? (state === 'maintenance' ? 'Ends ' + fmt(window.ends_at) : 'Planned ' + fmt(window.starts_at)) : '';
     const id = num(m.id);
     const heartbeat = m.kind === 'heartbeat';
     const target = heartbeat ? 'Heartbeat · every ' + m.heartbeat_interval_s / 60 + ' min' : m.url;
     const timing = heartbeat
       ? (m.heartbeat_last_at == null ? 'Awaiting first ping' : 'Last ping ' + fmt(new Date(m.heartbeat_last_at * 1000).toISOString()))
-      : (m.last_checked ? 'Checked ' + fmt(m.last_checked) : 'Awaiting first check');
+      : (m.maintenance_last_checked ? 'Maintenance check ' + fmt(m.maintenance_last_checked)
+         : m.last_checked ? 'Checked ' + fmt(m.last_checked) : 'Awaiting first check');
     const pct = m.samples_30d ? `${num(m.success_rate_30d).toFixed(2)}%` : '—';
     const rules = [m.required_phrase && 'Required phrase', m.expected_status && 'HTTP ' + m.expected_status,
       m.max_response_ms && '≤ ' + m.max_response_ms + ' ms'].filter(Boolean).join(' · ');
     return `<article class="bn-monitor-row" aria-label="${tidy(m.name)}: ${tidy(prettyState(state))}">
       <div class="bn-monitor-identity"><span class="bn-state-dot bn-${tidy(state)}" aria-hidden="true"></span>
         <div class="bn-monitor-title"><strong>${tidy(m.name)}</strong><span class="bn-host" title="${tidy(target)}">${tidy(target)}</span>${rules ? '<span class="bn-host">' + tidy(rules) + '</span>' : ''}</div></div>
-      <div class="bn-monitor-meta"><span>${pill(state)}</span><small>${tidy(timing)}</small></div>
+      <div class="bn-monitor-meta"><span>${pill(state)}</span><small>${tidy(timing)}</small>${notice ? '<small class="bn-maintenance-text">' + tidy(notice) + '</small>' : ''}</div>
       ${recentBars(m)}
       <div class="bn-monitor-metrics">${heartbeat
         ? '<strong>' + num(m.heartbeat_grace_s) / 60 + ' min</strong><small>Grace period</small>'
         : '<strong>' + pct + '</strong><small>30d checks passed</small><span>' + (m.response_ms == null ? '—' : num(m.response_ms) + ' ms') + ' latest</span>'}</div>
-      <div class="bn-monitor-actions">${heartbeat ? '<button class="bn-btn bn-btn-small" data-heartbeat-token="' + id + '">Replace key</button>' : '<button class="bn-btn bn-btn-small" data-check-rules="' + id + '" aria-label="Check rules for ' + tidy(m.name) + '">Rules</button>'}<button class="bn-btn bn-btn-small bn-investigate-button" data-investigate="${id}" aria-label="Investigate ${tidy(m.name)}">Investigate ↗</button>${heartbeat ? '' : '<button class="bn-btn bn-btn-small" data-check="' + id + '" aria-label="Check ' + tidy(m.name) + ' now">Check now</button>'}<button class="bn-icon-btn" data-remove="${id}" aria-label="Remove ${tidy(m.name)}" title="Remove monitor">×</button></div>
+      <div class="bn-monitor-actions">${heartbeat ? '<button class="bn-btn bn-btn-small" data-heartbeat-token="' + id + '">Replace key</button>' : '<button class="bn-btn bn-btn-small" data-check-rules="' + id + '" aria-label="Check rules for ' + tidy(m.name) + '">Rules</button><button class="bn-btn bn-btn-small" data-maintenance="' + id + '">Maintenance</button>'}<button class="bn-btn bn-btn-small bn-investigate-button" data-investigate="${id}" aria-label="Investigate ${tidy(m.name)}">Investigate ↗</button>${heartbeat ? '' : '<button class="bn-btn bn-btn-small" data-check="' + id + '" aria-label="Check ' + tidy(m.name) + ' now">Check now</button>'}<button class="bn-icon-btn" data-remove="${id}" aria-label="Remove ${tidy(m.name)}" title="Remove monitor">×</button></div>
     </article>`;
   }
 
@@ -82,7 +89,8 @@
     const checks=getChecks().filter(c=>Number(c.monitor_id)===Number(m.id)).slice(0,10);
     const heartbeat=m.kind==='heartbeat';
     const region=heartbeat?'heartbeat':'primary';
-    const latest=m.last_checked ? (checks.find(c=>c.region===region && c.checked_at===m.last_checked) || m) : null;
+    const maintenanceCheck = checks.find(c=>c.region==='maintenance' && c.checked_at===m.maintenance_last_checked);
+    const latest = maintenanceCheck || (m.last_checked ? (checks.find(c=>c.region===region && c.checked_at===m.last_checked) || m) : null);
     const hint=investigatorHint(latest, heartbeat);
     let safeUrl=heartbeat?'Heartbeat':String(m.url||'').split('?')[0];
     try { const u=new URL(m.url); safeUrl=u.origin+u.pathname; } catch(e){}
@@ -91,7 +99,7 @@
     copyableReport=[
       'BEEPNADO INCIDENT INVESTIGATOR · Evidence-based report',
       'Monitor: '+m.name+' · '+safeUrl,
-      'Latest state: '+(latest?prettyState(latest.state):'Not checked'),
+      'Latest state: '+(latest?prettyState(latest.state):'Not checked')+(maintenanceCheck?' (during planned maintenance)':''),
       'Last observed: '+(observed?fmt(observed):'No check yet'),
       'Possible issue: '+hint[0],
       'Observed evidence: '+hint[1],
@@ -101,7 +109,7 @@
       'Interpretation is not a confirmed root cause. Same-host checks cannot detect whole-server or Internet outages.'
     ].join('\n');
     const history=checks.length?checks.map(c=>
-      '<div class="bn-investigation-row"><span>'+tidy(fmt(c.checked_at))+'</span><span>'+tidy(prettyState(c.state))+'</span>'+(heartbeat?'':'<span>HTTP '+tidy(c.http_code??'—')+'</span><span>'+tidy(c.response_ms==null?'—':c.response_ms+' ms')+'</span>')+'</div>').join(''):'<p>No check history yet.</p>';
+      '<div class="bn-investigation-row"><span>'+tidy(fmt(c.checked_at))+'</span><span>'+tidy(prettyState(c.state))+(c.region==='maintenance'?' · planned':'')+'</span>'+(heartbeat?'':'<span>HTTP '+tidy(c.http_code??'—')+'</span><span>'+tidy(c.response_ms==null?'—':c.response_ms+' ms')+'</span>')+'</div>').join(''):'<p>No check history yet.</p>';
     investigatorDialog.innerHTML=
       '<div class="bn-investigator-top"><span>REAL CHECK EVIDENCE · BEEPNADO</span><button type="button" data-investigator-close aria-label="Close">×</button></div>'+
       '<h2>Incident Investigator</h2><p>'+tidy(m.name)+' · '+tidy(safeUrl)+'</p>'+
@@ -125,7 +133,7 @@
     return getMonitors().filter(m => {
       const phrase = (String(m.name || '') + ' ' + String(m.url || '')).toLowerCase();
       const wanted = filterState.status;
-      const status = m.last_checked ? m.state : 'pending';
+      const status = statusOf(m);
       return phrase.includes(filterState.query.toLowerCase()) && (wanted === 'all' || status === wanted);
     });
   }
@@ -142,8 +150,9 @@
     const percent = samples ? (passed / samples * 100).toFixed(2) + '%' : '—';
     return `<section class="bn-panel bn-snapshot" aria-label="Current monitor status"><h3>Current status <span class="bn-live-dot" title="Latest observations, not live network status"></span></h3>
       <div class="bn-status-trio"><div><strong class="bn-color-down">${n.down}</strong><small>Down</small></div><div><strong class="bn-color-up">${n.up}</strong><small>Up</small></div><div><strong class="bn-color-pending">${n.degraded + n.pending}</strong><small>Pending</small></div></div>
+      ${n.maintenance ? '<p class="bn-maintenance-text">' + n.maintenance + ' in planned maintenance</p>' : ''}
       <div class="bn-snapshot-footer">Monitoring <strong>${n.total}</strong> of <strong>${num(dash?.limit)}</strong> allowed monitors</div></section>
-      <section class="bn-panel bn-facts"><h3>Check history</h3><div class="bn-fact"><span>30-day check success rate</span><strong>${percent}</strong></div><div class="bn-fact"><span>30-day primary checks</span><strong>${samples.toLocaleString()}</strong></div><div class="bn-fact"><span>Recent incident records</span><strong>${(dash?.incidents || []).length}${(dash?.incidents || []).length === 30 ? '+' : ''}</strong></div><p>Check-based observations, not a time-weighted SLA. No data means no claim of uptime.</p></section>`;
+      <section class="bn-panel bn-facts"><h3>Check history</h3><div class="bn-fact"><span>30-day check success rate</span><strong>${percent}</strong></div><div class="bn-fact"><span>30-day primary checks</span><strong>${samples.toLocaleString()}</strong></div><div class="bn-fact"><span>Recent incident records</span><strong>${(dash?.incidents || []).length}${(dash?.incidents || []).length === 30 ? '+' : ''}</strong></div><p>Check success rates exclude planned maintenance. They measure recorded checks.</p></section>`;
   }
 
   function ruleFields(m={}, disabled=false) {
@@ -196,6 +205,72 @@
     rulesDialog.showModal();
   }
 
+  const maintenanceDialog = document.createElement('dialog');
+  maintenanceDialog.className = 'bn-investigator-dialog bn-rules-dialog';
+  maintenanceDialog.setAttribute('aria-labelledby', 'bn-maintenance-title');
+  document.body.appendChild(maintenanceDialog);
+
+  function localTimeInput(date) {
+    const local = new Date(date.getTime() - date.getTimezoneOffset() * 60000);
+    return local.toISOString().slice(0, 16);
+  }
+
+  function manageMaintenance(monitor) {
+    const window = monitor.maintenance;
+    const active = statusOf(monitor) === 'maintenance';
+    const action = active ? 'End maintenance' : 'Cancel scheduled window';
+    maintenanceDialog.innerHTML = `
+      <div class="bn-investigator-top"><span>MONITOR SETTINGS</span><button type="button" data-close-maintenance aria-label="Close">×</button></div>
+      <h2 id="bn-maintenance-title">Planned maintenance</h2><p>${tidy(monitor.name)}</p>
+      <p>BeepNado keeps checking your site. During the window, results stay in history and outage and recovery alerts are suppressed. Your public status page shows the window.</p>
+      <form class="work-form">
+        ${window ? `<p>${active ? 'In progress' : 'Scheduled'} · ${tidy(fmt(window.starts_at))} to ${tidy(fmt(window.ends_at))}</p>`
+          : `<label>Starts <small>(leave blank to start now)</small><input name="starts_at" type="datetime-local"></label>
+             <label>Ends<input name="ends_at" type="datetime-local" value="${localTimeInput(new Date(Date.now() + 3600000))}" required></label>
+             <p class="bn-note">Times are in your browser’s time zone.</p>`}
+        <p class="bn-note" role="status"></p>
+        <div class="bn-investigator-actions"><button type="submit" class="bn-btn bn-btn-primary">${window ? action : 'Save window'}</button><button type="button" class="bn-btn bn-btn-quiet" data-close-maintenance>Close</button></div>
+      </form>`;
+    maintenanceDialog.querySelectorAll('[data-close-maintenance]').forEach(button=>button.addEventListener('click',()=>maintenanceDialog.close()));
+    const form = maintenanceDialog.querySelector('form');
+    if (!window) {
+      const start = form.querySelector('[name=starts_at]');
+      const end = form.querySelector('[name=ends_at]');
+      start.addEventListener('change', () => {
+        if (start.value && end.value <= start.value) end.value = localTimeInput(new Date(new Date(start.value).getTime() + 3600000));
+      });
+    }
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const button = form.querySelector('[type=submit]');
+      button.disabled = true;
+      const feedback = form.querySelector('[role=status]');
+      feedback.textContent = '';
+      const path = '/api/monitors/' + num(monitor.id) + '/maintenance';
+      try {
+        if (window) {
+          await api(path + '/' + num(window.id), {method:'DELETE'});
+        } else {
+          const fields = new FormData(form);
+          const starts = fields.get('starts_at');
+          await api(path, {method:'POST', body:JSON.stringify({
+            starts_at: starts ? new Date(starts).toISOString() : null,
+            ends_at: new Date(fields.get('ends_at')).toISOString()
+          })});
+        }
+      } catch (error) {
+        feedback.textContent = error.message;
+        button.disabled = false;
+        return;
+      }
+      maintenanceDialog.close();
+      toast(window ? 'Maintenance window closed' : 'Maintenance window saved');
+      try { dash = await api('/api/dashboard'); renderView(); }
+      catch (error) { toast(error.message); }
+    });
+    maintenanceDialog.showModal();
+  }
+
   const heartbeatDialog=document.createElement('dialog');
   heartbeatDialog.className='bn-investigator-dialog bn-heartbeat-dialog';
   heartbeatDialog.setAttribute('aria-labelledby','bn-heartbeat-title');
@@ -241,7 +316,7 @@
       <div><span>Monitors</span><strong>${n.total}<small> / ${num(dash?.limit)}</small></strong></div>
       <div><span>Operational</span><strong class="bn-color-up">${n.up}</strong></div>
       <div><span>Confirmed down</span><strong class="bn-color-down">${n.down}</strong></div>
-      <div><span>Pending / degraded</span><strong class="bn-color-pending">${n.pending + n.degraded}</strong></div>
+      <div><span>Pending / degraded</span><strong class="bn-color-pending">${n.pending + n.degraded}</strong>${n.maintenance ? '<small class="bn-maintenance-text">' + n.maintenance + ' in maintenance</small>' : ''}</div>
     </div>`;
   }
 
@@ -249,7 +324,7 @@
     return `<div class="bn-toolbar"><div><h3>Monitors<span class="bn-count">${getMonitors().length}</span></h3><p>Website checks and job heartbeats</p></div>
       <div class="bn-toolbar-actions"><button class="bn-btn bn-btn-quiet" data-bn-refresh>↻ Refresh</button><button class="bn-btn bn-btn-primary" data-bn-new>+ New monitor</button></div></div>
       <div class="bn-filter-bar"><label class="bn-search-label" for="bn-search">Search monitors<input id="bn-search" type="search" placeholder="Search by name or URL" autocomplete="off" value="${tidy(filterState.query)}"></label>
-      <label class="bn-filter-label" for="bn-filter">Status<select id="bn-filter"><option value="all" ${filterState.status==='all'?'selected':''}>All statuses</option><option value="up" ${filterState.status==='up'?'selected':''}>Up</option><option value="down" ${filterState.status==='down'?'selected':''}>Down</option><option value="degraded" ${filterState.status==='degraded'?'selected':''}>Degraded</option><option value="pending" ${filterState.status==='pending'?'selected':''}>Pending</option></select></label></div>`;
+      <label class="bn-filter-label" for="bn-filter">Status<select id="bn-filter"><option value="all" ${filterState.status==='all'?'selected':''}>All statuses</option><option value="up" ${filterState.status==='up'?'selected':''}>Up</option><option value="down" ${filterState.status==='down'?'selected':''}>Down</option><option value="degraded" ${filterState.status==='degraded'?'selected':''}>Degraded</option><option value="pending" ${filterState.status==='pending'?'selected':''}>Pending</option><option value="maintenance" ${filterState.status==='maintenance'?'selected':''}>Maintenance</option></select></label></div>`;
   }
 
   function paintMonitorResults() {
@@ -333,6 +408,11 @@
         showHeartbeatCommand(token);
       } catch (error) { toast(error.message); }
       finally { button.disabled = false; }
+      return;
+    }
+    if (button.hasAttribute('data-maintenance')) {
+      const monitor = getMonitors().find(m => num(m.id) === num(button.dataset.maintenance));
+      if (monitor) manageMaintenance(monitor);
       return;
     }
     if (button.hasAttribute('data-check-rules')) {

@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 import h11
 from fastapi import FastAPI, HTTPException, Request, Response, Depends
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import AwareDatetime, BaseModel, Field
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = os.getenv('DATABASE_PATH', '/data/beepnado.sqlite3')
@@ -139,6 +139,12 @@ def init_db():
           http_code INTEGER, response_ms INTEGER, cert_days INTEGER, error TEXT
         );
         CREATE INDEX IF NOT EXISTS checks_history ON checks(monitor_id,id DESC);
+        CREATE TABLE IF NOT EXISTS maintenance_windows(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
+          starts_at TEXT NOT NULL, ends_at TEXT NOT NULL, CHECK(starts_at < ends_at)
+        );
+        CREATE INDEX IF NOT EXISTS maintenance_monitor_end ON maintenance_windows(monitor_id,ends_at DESC);
         CREATE TABLE IF NOT EXISTS incidents(
           id INTEGER PRIMARY KEY, monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
           opened_at TEXT NOT NULL, resolved_at TEXT, summary TEXT NOT NULL
@@ -183,6 +189,7 @@ def init_db():
             ('required_phrase', "TEXT NOT NULL DEFAULT ''"),
             ('expected_status', 'INTEGER'),
             ('max_response_ms', 'INTEGER'),
+            ('maintenance_last_checked', 'TEXT'),
             ('heartbeat_token_hash', 'TEXT'),
             ('heartbeat_interval_s', 'INTEGER'),
             ('heartbeat_grace_s', 'INTEGER'),
@@ -469,23 +476,44 @@ async def probe(url, *, required_phrase='', expected_status=None, max_response_m
 probe_locks = {}
 
 
-def record_check(monitor_id, result, region='primary'):
+def record_check(monitor_id, result):
     with db() as c:
-        m=c.execute('SELECT m.* ' + ACTIVE_MONITORS + ' AND m.id=? AND m.heartbeat_interval_s IS NULL',(monitor_id,)).fetchone()
-        if not m: raise HTTPException(404,'Monitor not found')
-        return record_observation(c, m, result, region)
+        c.execute('BEGIN IMMEDIATE')
+        monitor = c.execute('SELECT m.* ' + ACTIVE_MONITORS + ' AND m.id=? AND m.heartbeat_interval_s IS NULL',
+                            (monitor_id,)).fetchone()
+        if not monitor:
+            raise HTTPException(404, 'Monitor not found')
+        timestamp = now()
+        if c.execute('''SELECT 1 FROM maintenance_windows
+                        WHERE monitor_id=? AND starts_at<=? AND ends_at>?''',
+                     (monitor_id, timestamp, timestamp)).fetchone():
+            state = result['state']
+            store_check(c, monitor_id, 'maintenance', timestamp, state, result)
+            c.execute('''UPDATE monitors SET maintenance_last_checked=?,
+                         consecutive_failures=CASE WHEN state='degraded' THEN 0 ELSE consecutive_failures END
+                         WHERE id=?''', (timestamp, monitor_id))
+            return {'state': state, 'checked_at': timestamp, 'http_code': result['http_code'],
+                    'response_ms': result['response_ms'], 'maintenance': True}
+        return record_observation(c, monitor, result, 'primary', timestamp)
 
 
-def record_observation(c, m, result, region):
+def store_check(c, monitor_id, region, timestamp, state, result):
+    c.execute('''INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error)
+                 VALUES(?,?,?,?,?,?,?,?)''',
+              (monitor_id, region, timestamp, state, result['http_code'], result['response_ms'],
+               result['cert_days'], result['error']))
+
+
+def record_observation(c, m, result, region, timestamp=None):
     monitor_id = m['id']
     heartbeat = region == 'heartbeat'
     failures=m['consecutive_failures']+1 if result['state']=='down' else 0
     state='down' if failures>=(1 if heartbeat else 2) else 'degraded' if failures>0 else 'up'
-    timestamp=now()
-    c.execute('''UPDATE monitors SET last_checked=?,state=?,consecutive_failures=?,http_code=?,response_ms=?,cert_days=?,error=? WHERE id=?''',
+    timestamp = timestamp or now()
+    c.execute('''UPDATE monitors SET last_checked=?,state=?,consecutive_failures=?,http_code=?,response_ms=?,
+                 cert_days=?,error=?,maintenance_last_checked=NULL WHERE id=?''',
       (timestamp,state,failures,result['http_code'],result['response_ms'],result['cert_days'],result['error'],monitor_id))
-    c.execute('''INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error)
-                VALUES(?,?,?,?,?,?,?,?)''',(monitor_id,region,timestamp,state,result['http_code'],result['response_ms'],result['cert_days'],result['error']))
+    store_check(c, monitor_id, region, timestamp, state, result)
     incident=c.execute('SELECT id FROM incidents WHERE monitor_id=? AND resolved_at IS NULL ORDER BY id DESC LIMIT 1',(monitor_id,)).fetchone()
     if state=='down' and not incident:
         reason = result['error'] or 'Check failed'
@@ -526,9 +554,10 @@ async def scheduler():
         try:
             due=[]; clock=datetime.now(timezone.utc)
             with db() as c:
-                for row in c.execute('SELECT m.id,m.last_checked,u.plan ' + ACTIVE_MONITORS + ' AND m.heartbeat_interval_s IS NULL'):
-                    wait=PLAN_INTERVALS.get(row['plan'],300)
-                    if not row['last_checked'] or (clock-datetime.fromisoformat(row['last_checked'])).total_seconds()>=wait:
+                for row in c.execute('SELECT m.id,m.last_checked,m.maintenance_last_checked,u.plan ' + ACTIVE_MONITORS + ' AND m.heartbeat_interval_s IS NULL'):
+                    wait = PLAN_INTERVALS.get(row['plan'], 300)
+                    last_check = max(row['last_checked'] or '', row['maintenance_last_checked'] or '')
+                    if not last_check or (clock-datetime.fromisoformat(last_check)).total_seconds()>=wait:
                         due.append(row['id'])
                 c.execute('DELETE FROM checks WHERE checked_at<?',((clock-timedelta(days=30)).isoformat(timespec='seconds'),))
                 c.execute('DELETE FROM sessions WHERE expires_at<?',(now(),))
@@ -802,6 +831,22 @@ def me(request:Request):
             'plans':{'free':{'monitors':2,'interval':300},'pro':{'monitors':20,'interval':60},'team':{'monitors':100,'interval':60}}}
 
 
+def scheduled_maintenance(c, user_id, clock):
+    return {row['monitor_id']: dict(row) for row in c.execute('''
+        SELECT w.id,w.monitor_id,w.starts_at,w.ends_at
+        FROM maintenance_windows w JOIN monitors m ON m.id=w.monitor_id
+        WHERE m.user_id=? AND w.ends_at>?
+    ''', (user_id, clock))}
+
+
+def displayed_state(monitor, window, clock):
+    if window and window['starts_at'] <= clock:
+        return 'maintenance'
+    if monitor['maintenance_last_checked'] and monitor['state'] != 'down':
+        return 'pending'
+    return monitor['state']
+
+
 @app.get('/api/dashboard')
 def dashboard(user=Depends(require_user)):
     with db() as c:
@@ -820,7 +865,11 @@ def dashboard(user=Depends(require_user)):
               FROM checks ch JOIN monitors m ON m.id=ch.monitor_id
              WHERE m.user_id=? AND ch.region='primary' AND ch.checked_at>=?
              GROUP BY ch.monitor_id''',(user['id'],cutoff))}
+        clock = now()
+        windows = scheduled_maintenance(c, user['id'], clock)
         for mon in monitors:
+            mon['maintenance'] = windows.get(mon['id'])
+            mon['display_state'] = displayed_state(mon, mon['maintenance'], clock)
             mon.pop('heartbeat_token_hash')
             mon['kind'] = 'heartbeat' if mon['heartbeat_interval_s'] is not None else 'http'
             stat=samples.get(mon['id'])
@@ -957,7 +1006,7 @@ async def update_monitor_rules(monitor_id: int, input: CheckRules, user=Depends(
             if tuple(previous) != rules:
                 c.execute(
                     '''UPDATE monitors SET required_phrase=?,expected_status=?,max_response_ms=?,
-                       last_checked=NULL,state='pending',consecutive_failures=0,
+                       last_checked=NULL,maintenance_last_checked=NULL,state='pending',consecutive_failures=0,
                        http_code=NULL,response_ms=NULL,cert_days=NULL,error=NULL WHERE id=? AND user_id=?''',
                     (*rules, monitor_id, user['id']),
                 )
@@ -975,7 +1024,7 @@ def delete_monitor(monitor_id:int,user=Depends(require_csrf)):
 @app.post('/api/monitors/{monitor_id}/check')
 async def manual_check(monitor_id:int,user=Depends(require_csrf)):
     with db() as c:
-        monitor=c.execute('SELECT m.last_checked,m.heartbeat_interval_s ' + ACTIVE_MONITORS + ' AND m.id=? AND m.user_id=?',
+        monitor=c.execute('SELECT m.last_checked,m.maintenance_last_checked,m.heartbeat_interval_s ' + ACTIVE_MONITORS + ' AND m.id=? AND m.user_id=?',
                           (monitor_id,user['id'])).fetchone()
         if not monitor and c.execute('SELECT 1 FROM monitors WHERE id=? AND user_id=?',
                                      (monitor_id,user['id'])).fetchone():
@@ -983,11 +1032,58 @@ async def manual_check(monitor_id:int,user=Depends(require_csrf)):
     if not monitor:raise HTTPException(404,'Monitor not found')
     if monitor['heartbeat_interval_s'] is not None:
         raise HTTPException(409, 'Heartbeat monitors receive check-ins from your job')
-    if monitor['last_checked'] and (datetime.now(timezone.utc)-datetime.fromisoformat(monitor['last_checked'])).total_seconds()<15:
+    last_check = max(monitor['last_checked'] or '', monitor['maintenance_last_checked'] or '')
+    if last_check and (datetime.now(timezone.utc)-datetime.fromisoformat(last_check)).total_seconds()<15:
         raise HTTPException(429,'Wait 15 seconds between manual checks')
     result = await check_monitor(monitor_id)
     if result is None:raise HTTPException(409,'This monitor is no longer active')
     return {'ok':True,'result':result}
+
+
+class MaintenanceInput(BaseModel):
+    starts_at: AwareDatetime | None = None
+    ends_at: AwareDatetime
+
+
+@app.post('/api/monitors/{monitor_id}/maintenance', status_code=201)
+def schedule_maintenance(monitor_id: int, input: MaintenanceInput, user=Depends(require_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 ' + ACTIVE_MONITORS +
+                         ' AND m.id=? AND m.user_id=? AND m.heartbeat_interval_s IS NULL',
+                         (monitor_id, user['id'])).fetchone():
+            raise HTTPException(404, 'Active website monitor not found')
+        clock = datetime.fromisoformat(now())
+        start = input.starts_at.astimezone(timezone.utc).replace(microsecond=0) if input.starts_at else clock
+        end = input.ends_at.astimezone(timezone.utc).replace(microsecond=0)
+        if not clock <= start <= clock + timedelta(days=90):
+            raise HTTPException(422, 'Start now or schedule within the next 90 days')
+        if not timedelta(minutes=1) <= end - start <= timedelta(days=7):
+            raise HTTPException(422, 'Maintenance must last between 1 minute and 7 days')
+        if c.execute('SELECT 1 FROM maintenance_windows WHERE monitor_id=? AND ends_at>?',
+                     (monitor_id, clock.isoformat(timespec='seconds'))).fetchone():
+            raise HTTPException(409, 'End or cancel the existing maintenance window first')
+        cur = c.execute('INSERT INTO maintenance_windows(monitor_id,starts_at,ends_at) VALUES(?,?,?)',
+                        (monitor_id, start.isoformat(timespec='seconds'), end.isoformat(timespec='seconds')))
+        return {'id': cur.lastrowid}
+
+
+@app.delete('/api/monitors/{monitor_id}/maintenance/{window_id}')
+def end_maintenance(monitor_id: int, window_id: int, user=Depends(require_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        clock = now()
+        window = c.execute('''SELECT w.starts_at
+            FROM maintenance_windows w JOIN monitors m ON m.id=w.monitor_id
+            WHERE w.id=? AND m.id=? AND m.user_id=? AND w.ends_at>?''',
+            (window_id, monitor_id, user['id'], clock)).fetchone()
+        if not window:
+            raise HTTPException(404, 'Active or scheduled maintenance window not found')
+        if window['starts_at'] < clock:
+            c.execute('UPDATE maintenance_windows SET ends_at=? WHERE id=?', (clock, window_id))
+        else:
+            c.execute('DELETE FROM maintenance_windows WHERE id=?', (window_id,))
+    return {'ok': True}
 
 
 class StatusInput(BaseModel):
@@ -1010,8 +1106,18 @@ def status_page(slug:str):
     with db() as c:
         row=c.execute('SELECT user_id,title FROM status_pages WHERE slug=?',(slug,)).fetchone()
         if not row:raise HTTPException(404,'Status page unavailable')
-        mons=[{'name':x['name'],'state':x['state'],'last_checked':x['last_checked']} for x in c.execute('SELECT m.name,m.state,m.last_checked ' + ACTIVE_MONITORS +
-                    ' AND m.user_id=? ORDER BY m.name',(row['user_id'],))]
+        clock = now()
+        windows = scheduled_maintenance(c, row['user_id'], clock)
+        mons = []
+        for monitor in c.execute('SELECT m.id,m.name,m.state,m.last_checked,m.maintenance_last_checked ' +
+                                 ACTIVE_MONITORS + ' AND m.user_id=? ORDER BY m.name', (row['user_id'],)):
+            window = windows.get(monitor['id'])
+            mons.append({
+                'name': monitor['name'],
+                'state': displayed_state(monitor, window, clock),
+                'last_checked': monitor['maintenance_last_checked'] or monitor['last_checked'],
+                'maintenance': {'starts_at': window['starts_at'], 'ends_at': window['ends_at']} if window else None,
+            })
         incidents=[{'monitor':x['name'],'opened_at':x['opened_at'],'resolved_at':x['resolved_at']} for x in c.execute('''SELECT m.name,i.opened_at,i.resolved_at FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE m.user_id=? ORDER BY i.id DESC LIMIT 5''',(row['user_id'],))]
     return {'title':row['title'],'monitors':mons,'incidents':incidents,'observed_at':now()}
 
@@ -1235,7 +1341,7 @@ class WorkerResult(BaseModel):
 def remote_result(item:WorkerResult,request:Request):
     if not WORKER_TOKEN or len(WORKER_TOKEN)<32 or not hmac.compare_digest(request.headers.get('x-worker-token',''),WORKER_TOKEN):
         raise HTTPException(401,'Worker not authorized')
-    if item.state not in ('up','down') or item.region=='primary':raise HTTPException(422,'Invalid result')
+    if item.state not in ('up','down') or item.region in ('primary', 'maintenance', 'heartbeat'):raise HTTPException(422,'Invalid result')
     # Regional measurements are stored separately; they cannot create/close primary incidents.
     with db() as c:
         if not c.execute('SELECT 1 ' + ACTIVE_MONITORS + ' AND m.id=? AND m.heartbeat_interval_s IS NULL',(item.monitor_id,)).fetchone():raise HTTPException(404)

@@ -4,7 +4,7 @@ const esc = value => String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'
 let signedIn=false, user=null, view='overview', mode='register', dash=null, selectedPlan=null, resetToken=null, launchCapabilities=null;
 const fmt = value => value ? new Date(value).toLocaleString() : 'Not checked';
 const dateOnly = value => value ? new Date(value).toLocaleDateString() : '—';
-const prettyState = s => s==='up'?'Operational':s==='down'?'Down':s==='degraded'?'Unconfirmed failure':'Awaiting first check';
+const prettyState = s => s==='up'?'Operational':s==='down'?'Down':s==='degraded'?'Unconfirmed failure':s==='maintenance'?'Maintenance':'Awaiting check';
 const pill = state => `<span class="status-pill status-${esc(state)}">● ${prettyState(state)}</span>`;
 const toast = (text) => {const e=$('toast');e.textContent=text;e.classList.add('show');clearTimeout(e._t);e._t=setTimeout(()=>e.classList.remove('show'),4500)};
 async function api(path, opts={}){
@@ -149,16 +149,34 @@ async function openCheckout(plan){
  try{const d=await api('/api/billing/checkout',{method:'POST',body:JSON.stringify({plan})});location.href=d.url}catch(e){toast(e.message)}
 }
 async function renderPublicStatus(slug){
- show('status');
  try{
    const s=await api('/api/public-status/'+encodeURIComponent(slug));
-   const bad=s.monitors.some(m=>m.state==='down');const pending=s.monitors.some(m=>m.state!=='up');
-   $('status-body').innerHTML=`<span class="kicker">SERVICE HEALTH</span><h1>${esc(s.title)}</h1><p>Last loaded: ${fmt(s.observed_at)}</p><div class="status-banner ${bad?'alert':''}">${bad?'● One or more services are currently reporting downtime':pending?'◌ Some services have not confirmed a healthy state':'✓ All monitored services are operational'}</div><div class="panel"><h3>Services</h3>${s.monitors.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Status</th><th>Last checked</th></tr></thead><tbody>${s.monitors.map(m=>`<tr><td><strong>${esc(m.name)}</strong></td><td>${pill(m.state)}</td><td>${fmt(m.last_checked)}</td></tr>`).join('')}</tbody></table></div>`:empty('No public services listed','The account has not added a monitor.')}</div><div class="panel"><h3>Recent incidents</h3>${s.incidents.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Opened</th><th>Recovered</th></tr></thead><tbody>${s.incidents.map(i=>`<tr><td>${esc(i.monitor)}</td><td>${fmt(i.opened_at)}</td><td>${i.resolved_at?fmt(i.resolved_at):'Ongoing'}</td></tr>`).join('')}</tbody></table></div>`:empty('No incidents recorded','This page only displays incidents already observed by the monitor.')}</div><p class="billing-note">Displayed values reflect the most recent primary-region HTTP(S) observations, not a guaranteed SLA.</p>`;
+   const bad=s.monitors.some(m=>m.state==='down');
+   const maintenance=s.monitors.some(m=>m.state==='maintenance');
+   const pending=s.monitors.some(m=>!['up','maintenance'].includes(m.state));
+   const message=bad?'● One or more services are currently reporting downtime'
+     :maintenance?'◌ Planned maintenance is in progress'
+     :pending?'◌ Some services have not confirmed a healthy state':'✓ All monitored services are operational';
+   const rows = s.monitors.map(m => {
+     const window = m.maintenance;
+     const schedule = window && (m.state === 'maintenance'
+       ? 'Ends ' + fmt(window.ends_at)
+       : 'Scheduled ' + fmt(window.starts_at) + ' to ' + fmt(window.ends_at));
+     return `<tr><td><strong>${esc(m.name)}</strong></td>
+       <td>${pill(m.state)}${schedule ? '<div class="small-muted">' + esc(schedule) + '</div>' : ''}</td>
+       <td>${fmt(m.last_checked)}</td></tr>`;
+   }).join('');
+   $('status-body').innerHTML=`<span class="kicker">SERVICE HEALTH</span><h1>${esc(s.title)}</h1><p>Last loaded: ${fmt(s.observed_at)}</p><div class="status-banner ${bad?'alert':''}">${message}</div><div class="panel"><h3>Services</h3>${s.monitors.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Status</th><th>Last checked</th></tr></thead><tbody>${rows}</tbody></table></div>`:empty('No public services listed','The account has not added a monitor.')}</div><div class="panel"><h3>Recent incidents</h3>${s.incidents.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Opened</th><th>Recovered</th></tr></thead><tbody>${s.incidents.map(i=>`<tr><td>${esc(i.monitor)}</td><td>${fmt(i.opened_at)}</td><td>${i.resolved_at?fmt(i.resolved_at):'Ongoing'}</td></tr>`).join('')}</tbody></table></div>`:empty('No incidents recorded','This page only displays incidents already observed by the monitor.')}</div><p class="billing-note">Displayed values reflect the latest recorded monitor observations.</p>`;
  }catch(e){$('status-body').innerHTML=`<h1>Status page unavailable</h1><p>${esc(e.message)}</p>`}
 }
 async function init(){
  const statusMatch=location.pathname.match(/^\/s\/([a-z0-9-]+)$/);
- if(statusMatch){await renderPublicStatus(statusMatch[1]);return}
+ if(statusMatch){
+   show('status');
+   await renderPublicStatus(statusMatch[1]);
+   setInterval(()=>{if(!document.hidden)renderPublicStatus(statusMatch[1]);},30000);
+   return;
+ }
  try{launchCapabilities=await api('/api/availability')}catch(e){console.warn('Launch status unavailable')}
  try{await refreshUser()}catch(e){console.warn('Authentication status unavailable')}
  const start=async(which='register')=>{if(signedIn){await loadDashboard()}else openAuth(which)};
