@@ -50,6 +50,26 @@ PLAN_LIMITS = {'free': 2, 'pro': 20, 'team': 100}
 PLAN_INTERVALS = {'free': 300, 'pro': 60, 'team': 60}
 COOKIE = 'beepnado_session'
 
+# Narrow workaround for owner-operated domains on the same Docker host.
+# DNS validation still happens against public IPs; only exact operator-configured
+# names pointing at the operator's public IP may connect to the Caddy container.
+# This route monitors local service health, NOT external Internet reachability.
+SELF_HOSTED_PUBLIC_IP = os.getenv('SELF_HOSTED_PUBLIC_IP', '').strip()
+SELF_HOSTED_DOMAINS = frozenset(
+    h.strip().lower().rstrip('.') for h in os.getenv('SELF_HOSTED_DOMAINS', '').split(',') if h.strip()
+)
+SELF_HOSTED_CADDY = 'jason-portfolio'  # fixed service name on portfolio_default
+
+
+def probe_connection_target(host: str, validated_public_ip: str) -> str:
+    """Keep public DNS/SSRF checks; route only explicitly allowed own domains."""
+    if (SELF_HOSTED_PUBLIC_IP
+            and validated_public_ip == SELF_HOSTED_PUBLIC_IP
+            and host in SELF_HOSTED_DOMAINS
+            and ipaddress.ip_address(validated_public_ip).is_global):
+        return SELF_HOSTED_CADDY
+    return validated_public_ip
+
 
 def now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
@@ -305,9 +325,10 @@ async def probe(url):
     writer=None
     try:
         host,ip,port,path,scheme=await validate_url(url)
+        target=probe_connection_target(host,ip)
         context=ssl.create_default_context() if scheme=='https' else None
         reader,writer=await asyncio.wait_for(asyncio.open_connection(
-            ip,port,ssl=context,server_hostname=host if context else None), timeout=8)
+            target,port,ssl=context,server_hostname=host if context else None), timeout=8)
         writer.write((f'GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: BeepNado/0.1\r\nConnection: close\r\n\r\n').encode('ascii'))
         await asyncio.wait_for(writer.drain(),5)
         line=await asyncio.wait_for(reader.readline(),8)
