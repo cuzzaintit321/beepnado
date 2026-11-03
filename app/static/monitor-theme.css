@@ -44,6 +44,18 @@
 .workspace .price-card .price{color:#f5f8ff}
 .workspace .price-card p{color:#aab8c9}
 .workspace .btn-accent{background:linear-gradient(120deg,#ffab74,#ff857e);color:#1c2233}
+.workspace .price-card .btn-outline-dark[data-bill-plan]:disabled{
+  background:#14352f;
+  border-color:#438675;
+  color:#a8f4d2;
+  box-shadow:none;
+  cursor:default;
+  opacity:1;
+}
+.workspace .price-card .btn-outline-dark[data-bill-plan]:disabled::before{
+  content:"✓" / "";
+  margin-inline-end:.45em;
+}
 .workspace .work-cards{grid-template-columns:repeat(4,minmax(0,1fr))}
 /* New monitor console */
 .bn-summary-strip{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:0 0 21px}
