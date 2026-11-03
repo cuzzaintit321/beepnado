@@ -1,6 +1,8 @@
-# BeepNado — v2 Launch Candidate
+# BeepNado 🌪️ — Your websites. Our radar.
 
-**BeepNado** is a self-hosted uptime monitoring SaaS. The live public marketing website and an existing earlier app are already on `yeet`. This release upgrades the existing app and its public site's interactions **without resetting the Docker volume**.
+**BeepNado** is a self-hosted uptime monitoring platform for small businesses, freelancers, and web agencies. Built with Python, FastAPI, Docker, and SQLite, it tracks HTTP/HTTPS availability, response times, SSL certificate expiry, and outage/recovery history. Users can manage monitors in a secure dashboard and share public status pages. Email alerts require configured SMTP.
+
+> **Launch status:** Beta release candidate. Public registration is disabled until email verification is configured; Stripe billing is not yet active.
 
 ## What's implemented and tested
 
