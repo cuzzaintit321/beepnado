@@ -24,7 +24,14 @@ async def check():
         assert line.startswith(b'HTTP/1.') and int(line.split()[1]) < 400, 'Caddy target is not healthy'
     finally:
         writer.close()
-        await writer.wait_closed()
+        try:
+            await asyncio.wait_for(writer.wait_closed(), 3)
+        except ssl.SSLError as exc:
+            # Caddy returned HTTP 200 with valid TLS. Ignore only the
+            # OpenSSL shutdown race caused by unread response-body bytes.
+            # Do NOT suppress certificate or handshake errors.
+            if 'APPLICATION_DATA_AFTER_CLOSE_NOTIFY' not in str(exc):
+                raise
 
 asyncio.run(check())
 PY
