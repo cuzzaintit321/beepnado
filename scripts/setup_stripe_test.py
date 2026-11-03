@@ -91,7 +91,7 @@ def stripe_request(key, resource, *, query=None, data=None, retry_key=None):
         raise RuntimeError(f'Stripe {resource.split("/")[0]} request failed (HTTP {exc.code}).') from None
 
 
-def ensure_price(key, tier, amount):
+def ensure_price(key, tier, amount, *, livemode=False):
     lookup = f'beepnado_{tier.lower()}_usd_month_v1'
     prices = stripe_request(key, 'prices', query=[('lookup_keys[]', lookup), ('limit', 2)])['data']
     if len(prices) > 1:
@@ -108,45 +108,46 @@ def ensure_price(key, tier, amount):
             'metadata[application]': 'beepnado',
         })
     recurring = price.get('recurring') or {}
-    if not (price.get('active') and price.get('livemode') is False
+    if not (price.get('active') and price.get('livemode') is livemode
             and price.get('lookup_key') == lookup and price.get('currency') == 'usd'
             and price.get('unit_amount') == amount and recurring.get('interval') == 'month'
             and recurring.get('interval_count') == 1):
-        raise RuntimeError(f'Stripe returned an unexpected test price for {tier}.')
+        raise RuntimeError(f'Stripe returned an unexpected price for {tier}.')
     return price['id']
 
 
-def ensure_webhook(key):
+def ensure_webhook(key, *, state_path=None, livemode=False):
+    state_path = STATE if state_path is None else state_path
     account = stripe_request(key, 'account')['id']
-    if STATE.exists():
-        if STATE.is_symlink() or STATE.stat().st_mode & 0o077:
-            raise RuntimeError('The Stripe test state file must be private.')
-        state = json.loads(STATE.read_bytes())
+    if state_path.exists():
+        if state_path.is_symlink() or state_path.stat().st_mode & 0o077:
+            raise RuntimeError('The Stripe webhook state file must be private.')
+        state = json.loads(state_path.read_bytes())
         if state.get('account') != account:
             raise RuntimeError('Saved BeepNado webhook belongs to another Stripe account.')
     else:
         endpoints = stripe_request(key, 'webhook_endpoints', query={'limit': 100})
         if endpoints.get('has_more') or any(item.get('url') == WEBHOOK for item in endpoints['data']):
-            raise RuntimeError('An existing BeepNado test endpoint needs review in Stripe Workbench.')
+            raise RuntimeError('An existing BeepNado endpoint needs review in Stripe Workbench.')
         state = {'account': account, 'request': uuid4().hex}
-        write_private(STATE, json.dumps(state).encode())
+        write_private(state_path, json.dumps(state).encode())
 
     if state.get('id'):
         endpoint = stripe_request(key, 'webhook_endpoints/' + state['id'])
     else:
         endpoint = stripe_request(key, 'webhook_endpoints', retry_key='beepnado-' + state['request'],
-                                  data=[('url', WEBHOOK), ('description', 'BeepNado test subscriptions'),
+                                  data=[('url', WEBHOOK), ('description', 'BeepNado live subscriptions' if livemode else 'BeepNado test subscriptions'),
                                         ('metadata[application]', 'beepnado'),
                                         *[('enabled_events[]', event) for event in EVENTS]])
-    if (endpoint.get('url') != WEBHOOK or endpoint.get('livemode') is not False
+    if (endpoint.get('url') != WEBHOOK or endpoint.get('livemode') is not livemode
             or endpoint.get('status') != 'enabled' or set(endpoint.get('enabled_events', [])) != set(EVENTS)):
-        raise RuntimeError('Stripe returned an unexpected test webhook configuration.')
+        raise RuntimeError('Stripe returned an unexpected webhook configuration.')
     signing = state.get('signing') or endpoint.get('secret', '')
     if not re.fullmatch(r'whsec_[A-Za-z0-9_]+', signing):
-        raise RuntimeError('Stripe did not return the test webhook signing secret.')
+        raise RuntimeError('Stripe did not return the webhook signing secret.')
     if not state.get('id'):
         state.update(id=endpoint['id'], signing=signing)
-        write_private(STATE, json.dumps(state).encode())
+        write_private(state_path, json.dumps(state).encode())
     return signing
 
 
@@ -169,8 +170,9 @@ print('verified' if allowed else 'missing')
         raise RuntimeError('Sign in with a verified BeepNado account before enabling test checkout.')
 
 
-def check_webhook(signing):
-    body = '{"id":"evt_beepnado_setup_probe","object":"event","type":"beepnado.setup_probe","livemode":false,"data":{"object":{}}}'
+def check_webhook(signing, *, livemode=False):
+    body = json.dumps({'id': 'evt_beepnado_setup_probe', 'object': 'event', 'type': 'beepnado.setup_probe',
+                       'livemode': livemode, 'data': {'object': {}}})
     timestamp = int(time.time())
     signature = hmac.new(signing.encode(), f'{timestamp}.{body}'.encode(), hashlib.sha256).hexdigest()
     status = command('curl', '-sS', '--max-time', '10', '--resolve', f'{HOST}:443:127.0.0.1',
@@ -178,7 +180,7 @@ def check_webhook(signing):
                      '-H', f'Stripe-Signature: t={timestamp},v1={signature}', '--data-binary', '@-',
                      WEBHOOK, input_text=body).strip()
     if status != '200':
-        raise RuntimeError(f'BeepNado did not accept the signed test webhook probe (HTTP {status}).')
+        raise RuntimeError(f'BeepNado did not accept the signed webhook probe (HTTP {status}).')
 
 
 def run():

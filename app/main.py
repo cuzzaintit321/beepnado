@@ -47,9 +47,25 @@ TRUSTED_PROXY_IP = os.getenv('TRUSTED_PROXY_IP', '').strip()
 STRIPE_KEY = os.getenv('STRIPE_SECRET_KEY', '')
 STRIPE_SIGNING = os.getenv('STRIPE_WEBHOOK_SECRET', '')
 STRIPE_TEST_EMAIL = os.getenv('STRIPE_TEST_EMAIL', '').strip().lower()
+STRIPE_LIVE_MODE = STRIPE_KEY.startswith(('sk_live_', 'rk_live_'))
+STRIPE_LIVE_CHECKOUT_ENABLED = os.getenv('STRIPE_LIVE_CHECKOUT_ENABLED', '').lower() == 'true'
+STRIPE_PORTAL_CONFIGURATION = os.getenv('STRIPE_PORTAL_CONFIGURATION', '')
+LIVE_WEBHOOK_LOCK = asyncio.Lock()
 PRICE_IDS = {'pro': os.getenv('STRIPE_PRICE_PRO',''), 'team': os.getenv('STRIPE_PRICE_TEAM','')}
 PLAN_LIMITS = {'free': 2, 'pro': 20, 'team': 100}
 PLAN_INTERVALS = {'free': 300, 'pro': 60, 'team': 60}
+# Keep the oldest monitors active on downgrade. Later upgrades restore capacity
+# automatically because this filter leaves monitor rows and history intact.
+MONITOR_PLAN_LIMIT = 'CASE u.plan ' + ' '.join(
+    f"WHEN '{plan}' THEN {limit}" for plan, limit in PLAN_LIMITS.items()
+) + f" ELSE {PLAN_LIMITS['free']} END"
+ACTIVE_MONITORS = f'''
+    FROM monitors m JOIN users u ON u.id=m.user_id
+    WHERE m.enabled=1 AND (
+        SELECT COUNT(*) FROM monitors earlier
+        WHERE earlier.user_id=m.user_id AND earlier.enabled=1 AND earlier.id<m.id
+    ) < ({MONITOR_PLAN_LIMIT})
+'''
 COOKIE = 'beepnado_session'
 
 # Narrow workaround for owner-operated domains on the same Docker host.
@@ -136,6 +152,12 @@ def init_db():
         );
         CREATE INDEX IF NOT EXISTS notifications_by_user ON notifications(user_id,id DESC);
         CREATE TABLE IF NOT EXISTS billing_events(event_id TEXT PRIMARY KEY, processed_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS billing_checkout(
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          livemode INTEGER NOT NULL, plan TEXT NOT NULL, request_key TEXT NOT NULL,
+          created_at INTEGER NOT NULL, customer TEXT, session_id TEXT,
+          PRIMARY KEY (user_id, livemode)
+        );
         CREATE TABLE IF NOT EXISTS auth_tokens(
           token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           purpose TEXT NOT NULL CHECK(purpose IN ('verify','reset')),
@@ -358,7 +380,7 @@ probe_locks = {}
 
 def record_check(monitor_id, result, region='primary'):
     with db() as c:
-        m=c.execute('SELECT * FROM monitors WHERE id=? AND enabled=1',(monitor_id,)).fetchone()
+        m=c.execute('SELECT m.* ' + ACTIVE_MONITORS + ' AND m.id=?',(monitor_id,)).fetchone()
         if not m: raise HTTPException(404,'Monitor not found')
         failures=m['consecutive_failures']+1 if result['state']=='down' else 0
         state='down' if failures>=2 else 'degraded' if failures>0 else 'up'
@@ -387,7 +409,7 @@ async def check_monitor(monitor_id):
     lock=probe_locks.setdefault(monitor_id,asyncio.Lock())
     async with lock:
         with db() as c:
-            mon=c.execute('SELECT url FROM monitors WHERE id=? AND enabled=1',(monitor_id,)).fetchone()
+            mon=c.execute('SELECT m.url ' + ACTIVE_MONITORS + ' AND m.id=?',(monitor_id,)).fetchone()
         if not mon:return None
         return record_check(monitor_id,await probe(mon['url']))
 
@@ -398,7 +420,7 @@ async def scheduler():
         try:
             due=[]; clock=datetime.now(timezone.utc)
             with db() as c:
-                for row in c.execute('''SELECT m.id,m.last_checked,u.plan FROM monitors m JOIN users u ON u.id=m.user_id WHERE m.enabled=1'''):
+                for row in c.execute('SELECT m.id,m.last_checked,u.plan ' + ACTIVE_MONITORS):
                     wait=PLAN_INTERVALS.get(row['plan'],300)
                     if not row['last_checked'] or (clock-datetime.fromisoformat(row['last_checked'])).total_seconds()>=wait:
                         due.append(row['id'])
@@ -467,13 +489,17 @@ async def headers(request: Request, call_next):
     return response
 
 
-def billing_allowed(user):
+def billing_account_allowed(user):
     if not (STRIPE_SIGNING and all(PRICE_IDS.values())):
         return False
-    if STRIPE_KEY.startswith(('sk_live_', 'rk_live_')):
-        return True
+    if STRIPE_LIVE_MODE:
+        return bool(STRIPE_PORTAL_CONFIGURATION)
     return bool(STRIPE_KEY.startswith(('sk_test_', 'rk_test_')) and STRIPE_TEST_EMAIL
                 and user and user['email_verified_at'] and user['email'] == STRIPE_TEST_EMAIL)
+
+
+def billing_allowed(user):
+    return billing_account_allowed(user) and (not STRIPE_LIVE_MODE or STRIPE_LIVE_CHECKOUT_ENABLED)
 
 
 @app.get('/api/availability')
@@ -682,8 +708,11 @@ async def add_monitor(input:MonitorInput,user=Depends(require_csrf)):
     try: await validate_url(input.url)
     except ValueError as e:raise HTTPException(422,str(e)) from e
     with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        current = c.execute('SELECT plan FROM users WHERE id=?',(user['id'],)).fetchone()
+        if not current:raise HTTPException(401,'Sign in to continue')
         count=c.execute('SELECT COUNT(*) FROM monitors WHERE user_id=?',(user['id'],)).fetchone()[0]
-        if count>=PLAN_LIMITS[user['plan']]:raise HTTPException(403,'Plan monitor limit reached')
+        if count>=PLAN_LIMITS[current['plan']]:raise HTTPException(403,'Plan monitor limit reached')
         cur=c.execute('INSERT INTO monitors(user_id,name,url,created_at) VALUES(?,?,?,?)',(user['id'],input.name.strip(),input.url.strip(),now()))
         return {'id':cur.lastrowid,'ok':True}
 
@@ -699,11 +728,17 @@ def delete_monitor(monitor_id:int,user=Depends(require_csrf)):
 @app.post('/api/monitors/{monitor_id}/check')
 async def manual_check(monitor_id:int,user=Depends(require_csrf)):
     with db() as c:
-        monitor=c.execute('SELECT last_checked FROM monitors WHERE id=? AND user_id=?',(monitor_id,user['id'])).fetchone()
+        monitor=c.execute('SELECT m.last_checked ' + ACTIVE_MONITORS + ' AND m.id=? AND m.user_id=?',
+                          (monitor_id,user['id'])).fetchone()
+        if not monitor and c.execute('SELECT 1 FROM monitors WHERE id=? AND user_id=?',
+                                     (monitor_id,user['id'])).fetchone():
+            raise HTTPException(403,'This monitor is paused under your current plan')
     if not monitor:raise HTTPException(404,'Monitor not found')
     if monitor['last_checked'] and (datetime.now(timezone.utc)-datetime.fromisoformat(monitor['last_checked'])).total_seconds()<15:
         raise HTTPException(429,'Wait 15 seconds between manual checks')
-    return {'ok':True,'result':await check_monitor(monitor_id)}
+    result = await check_monitor(monitor_id)
+    if result is None:raise HTTPException(409,'This monitor is no longer active')
+    return {'ok':True,'result':result}
 
 
 class StatusInput(BaseModel):
@@ -726,7 +761,8 @@ def status_page(slug:str):
     with db() as c:
         row=c.execute('SELECT user_id,title FROM status_pages WHERE slug=?',(slug,)).fetchone()
         if not row:raise HTTPException(404,'Status page unavailable')
-        mons=[{'name':x['name'],'state':x['state'],'last_checked':x['last_checked']} for x in c.execute('SELECT name,state,last_checked FROM monitors WHERE user_id=? AND enabled=1 ORDER BY name',(row['user_id'],))]
+        mons=[{'name':x['name'],'state':x['state'],'last_checked':x['last_checked']} for x in c.execute('SELECT m.name,m.state,m.last_checked ' + ACTIVE_MONITORS +
+                    ' AND m.user_id=? ORDER BY m.name',(row['user_id'],))]
         incidents=[{'monitor':x['name'],'opened_at':x['opened_at'],'resolved_at':x['resolved_at']} for x in c.execute('''SELECT m.name,i.opened_at,i.resolved_at FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE m.user_id=? ORDER BY i.id DESC LIMIT 5''',(row['user_id'],))]
     return {'title':row['title'],'monitors':mons,'incidents':incidents,'observed_at':now()}
 
@@ -750,33 +786,105 @@ class CheckoutInput(BaseModel):
     plan:str
 
 
+def checkout_attempt(user_id, plan):
+    # Serialize reservations across requests without holding a database lock during Stripe I/O.
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        user = c.execute('SELECT * FROM users WHERE id=?', (user_id,)).fetchone()
+        if not user or not billing_allowed(user):
+            raise HTTPException(503, 'Paid checkout is unavailable')
+        if user['stripe_subscription'] and user['subscription_status'] not in ('canceled', 'incomplete_expired'):
+            raise HTTPException(409, 'Manage your existing subscription in billing')
+        attempt = c.execute(
+            'SELECT * FROM billing_checkout WHERE user_id=? AND livemode=?',
+            (user_id, STRIPE_LIVE_MODE),
+        ).fetchone()
+        if attempt is None:
+            c.execute(
+                '''INSERT INTO billing_checkout(user_id,livemode,plan,request_key,created_at,customer)
+                   VALUES(?,?,?,?,?,?)''',
+                (user_id, STRIPE_LIVE_MODE, plan, secrets.token_hex(24), int(time.time()), user['stripe_customer']),
+            )
+            attempt = c.execute(
+                'SELECT * FROM billing_checkout WHERE user_id=? AND livemode=?',
+                (user_id, STRIPE_LIVE_MODE),
+            ).fetchone()
+        return dict(user), dict(attempt)
+
+
+def checkout_session(stripe, user_id, plan):
+    while True:
+        user, attempt = checkout_attempt(user_id, plan)
+        if not attempt['session_id']:
+            break
+        session = stripe.checkout.Session.retrieve(attempt['session_id'])
+        if session.status == 'open':
+            if attempt['plan'] == plan:
+                return session.url
+            session = stripe.checkout.Session.expire(attempt['session_id'])
+        completed_and_canceled = (
+            session.status == 'complete' and session.subscription == user['stripe_subscription']
+            and user['subscription_status'] in ('canceled', 'incomplete_expired')
+        )
+        if session.status != 'expired' and not completed_and_canceled:
+            raise HTTPException(409, 'Your last checkout is still being processed. Check your plan before trying again.')
+        with db() as c:
+            c.execute('DELETE FROM billing_checkout WHERE request_key=?', (attempt['request_key'],))
+
+    if attempt['plan'] != plan:
+        raise HTTPException(409, 'Retry the plan you selected first.')
+    if time.time() - attempt['created_at'] >= 23 * 3600:
+        raise HTTPException(409, 'This checkout attempt needs support before it can be retried.')
+    params = {
+        'mode': 'subscription',
+        'line_items': [{'price': PRICE_IDS[plan], 'quantity': 1}],
+        'success_url': SITE_URL + '/?billing=return',
+        'cancel_url': SITE_URL + '/?billing=cancel',
+        'client_reference_id': str(user_id),
+        'subscription_data': {'metadata': {'beepnado_user_id': str(user_id)}},
+    }
+    if attempt['customer']:
+        params['customer'] = attempt['customer']
+    else:
+        params['customer_email'] = user['email']
+    session = stripe.checkout.Session.create(**params, idempotency_key='beepnado-' + attempt['request_key'])
+    with db() as c:
+        c.execute('UPDATE billing_checkout SET session_id=? WHERE request_key=?',
+                  (session.id, attempt['request_key']))
+    if session.status != 'open' or not session.url:
+        raise HTTPException(409, 'Your last checkout is still being processed. Check your plan before trying again.')
+    return session.url
+
+
 @app.post('/api/billing/checkout')
-def checkout(input:CheckoutInput,user=Depends(require_csrf)):
+def checkout(input: CheckoutInput, user=Depends(require_csrf)):
     if not billing_allowed(user):
         raise HTTPException(503, 'Paid checkout is unavailable')
-    if input.plan not in ('pro','team'):
+    if input.plan not in ('pro', 'team'):
         raise HTTPException(422, 'Unknown paid plan')
-    stripe=get_stripe()
-    if user['stripe_customer'] and user['subscription_status'] in ('active','trialing','past_due'):
-        raise HTTPException(409,'Manage your existing subscription in billing')
-    params={'mode':'subscription','line_items':[{'price':PRICE_IDS[input.plan],'quantity':1}],
-            'success_url':SITE_URL+'/?billing=return','cancel_url':SITE_URL+'/?billing=cancel',
-            'client_reference_id':str(user['id']),
-            'subscription_data':{'metadata':{'beepnado_user_id':str(user['id'])}}}
-    if user['stripe_customer']:params['customer']=user['stripe_customer']
-    else: params['customer_email']=user['email']
-    try:return {'url':stripe.checkout.Session.create(**params).url}
-    except Exception as exc:raise HTTPException(502,'Unable to create Checkout session') from exc
+    stripe = get_stripe()
+    try:
+        return {'url': checkout_session(stripe, user['id'], input.plan)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(502, 'Unable to create Checkout session. Retry the same plan.') from exc
 
 
 @app.post('/api/billing/portal')
 def portal(user=Depends(require_csrf)):
-    if not billing_allowed(user):
+    if not billing_account_allowed(user):
         raise HTTPException(503, 'Billing portal is unavailable')
-    if not user['stripe_customer']:raise HTTPException(404,'No paid subscription account')
-    stripe=get_stripe()
-    try:return {'url':stripe.billing_portal.Session.create(customer=user['stripe_customer'],return_url=SITE_URL+'/').url}
-    except Exception as exc:raise HTTPException(502,'Unable to open billing portal') from exc
+    if not user['stripe_customer']:
+        raise HTTPException(404, 'No paid subscription account')
+    stripe = get_stripe()
+    params = {'customer': user['stripe_customer'], 'return_url': SITE_URL + '/#pricing'}
+    if STRIPE_LIVE_MODE:
+        params['configuration'] = STRIPE_PORTAL_CONFIGURATION
+    try:
+        return {'url': stripe.billing_portal.Session.create(**params).url}
+    except Exception as exc:
+        raise HTTPException(502, 'Unable to open billing portal') from exc
 
 
 SUBSCRIPTION_EVENTS = frozenset({
@@ -794,10 +902,33 @@ async def stripe_webhook(request: Request):
     except Exception as exc:
         raise HTTPException(400, 'Stripe webhook signature invalid') from exc
     if (event['type'] not in SUBSCRIPTION_EVENTS
-            or event.get('livemode') != STRIPE_KEY.startswith(('sk_live_', 'rk_live_'))):
+            or event.get('livemode') != STRIPE_LIVE_MODE):
         return {'ok': True}
 
-    sub = event['data']['object']
+    if STRIPE_LIVE_MODE:
+        # Stripe can deliver subscription events out of order. The single web worker
+        # serializes reconciliation against the current Stripe subscription.
+        async with LIVE_WEBHOOK_LOCK:
+            sub = event['data']['object']
+            if event['type'] != 'customer.subscription.deleted':
+                with db() as c:
+                    if c.execute('SELECT 1 FROM billing_events WHERE event_id=?', (event['id'],)).fetchone():
+                        return {'ok': True}
+                    linked = c.execute(
+                        'SELECT 1 FROM users WHERE stripe_customer=? AND stripe_subscription=?',
+                        (sub.get('customer'), sub.get('id')),
+                    ).fetchone()
+                if not linked and not (sub.get('metadata') or {}).get('beepnado_user_id'):
+                    return {'ok': True}
+                try:
+                    sub = await asyncio.to_thread(stripe.Subscription.retrieve, sub['id'])
+                except Exception as exc:
+                    raise HTTPException(502, 'Unable to verify Stripe subscription') from exc
+            return reconcile_subscription(event, sub)
+    return reconcile_subscription(event, event['data']['object'])
+
+
+def reconcile_subscription(event, sub):
     customer, subscription = sub.get('customer'), sub.get('id')
     if not customer or not subscription:
         return {'ok': True}
@@ -815,13 +946,13 @@ async def stripe_webhook(request: Request):
             'SELECT * FROM users WHERE stripe_customer=? AND stripe_subscription=?',
             (customer, subscription),
         ).fetchone()
-        if user is None and uid and str(uid).isascii() and str(uid).isdigit() and len(str(uid)) <= 18 and plan:
+        if user is None and uid and str(uid).isascii() and str(uid).isdigit() and len(str(uid)) <= 18 and plan and status not in ('canceled', 'incomplete_expired'):
             user = c.execute(
                 '''SELECT * FROM users WHERE id=? AND (stripe_customer IS NULL OR stripe_customer=?)
                    AND (stripe_subscription IS NULL OR subscription_status IN ('canceled', 'incomplete_expired'))''',
                 (int(uid), customer),
             ).fetchone()
-        if user and billing_allowed(user):
+        if user and billing_account_allowed(user):
             if user['stripe_subscription'] == subscription and user['subscription_status'] == 'canceled':
                 return {'ok': True}
             active_plan = plan if plan and status in ('active', 'trialing') else 'free'
@@ -837,7 +968,7 @@ async def stripe_webhook(request: Request):
 def remote_targets(request:Request):
     if not WORKER_TOKEN or len(WORKER_TOKEN)<32 or not hmac.compare_digest(request.headers.get('x-worker-token',''),WORKER_TOKEN):
         raise HTTPException(401,'Worker not authorized')
-    with db() as c:targets=[{'id':row['id'],'url':row['url']} for row in c.execute('SELECT id,url FROM monitors WHERE enabled=1')]
+    with db() as c:targets=[{'id':row['id'],'url':row['url']} for row in c.execute('SELECT m.id,m.url ' + ACTIVE_MONITORS)]
     return {'targets':targets}
 
 
@@ -858,7 +989,7 @@ def remote_result(item:WorkerResult,request:Request):
     if item.state not in ('up','down') or item.region=='primary':raise HTTPException(422,'Invalid result')
     # Regional measurements are stored separately; they cannot create/close primary incidents.
     with db() as c:
-        if not c.execute('SELECT 1 FROM monitors WHERE id=? AND enabled=1',(item.monitor_id,)).fetchone():raise HTTPException(404)
+        if not c.execute('SELECT 1 ' + ACTIVE_MONITORS + ' AND m.id=?',(item.monitor_id,)).fetchone():raise HTTPException(404)
         c.execute('INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error) VALUES(?,?,?,?,?,?,?,?)',
                   (item.monitor_id,item.region,now(),item.state,item.http_code,item.response_ms,item.cert_days,(item.error or '')[:100]))
     return {'ok':True}
