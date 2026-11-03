@@ -10,6 +10,22 @@
 
 > **Launch status:** Beta release candidate. Public registration is disabled until email verification is configured; Stripe billing is not yet active.
 
+## Incident Investigator (evidence-based)
+
+BeepNado now offers an **Investigate** button on each monitor in the signed-in dark dashboard. It summarizes the latest recorded check and recent history, groups supported failure evidence into plain-English categories (DNS, TLS, timeout, connection refused, HTTP errors), suggests a next troubleshooting step, and lets the operator copy a client-ready evidence report. Results are **possible causes, not proven root causes**; only real check records are used.
+
+The public landing page's generic feature grid and simulated downtime demonstration were removed, with a new Incident Investigator showcase in their place.
+
+**Deploy both the application and the separate public landing page from Fedora:**
+
+```bash
+git -C ~/beepnado-launch pull --ff-only
+bash ~/beepnado-launch/scripts/push_upgrade_from_fedora.sh
+bash ~/beepnado-launch/scripts/deploy_public_investigator.sh
+```
+
+The second script updates only the public BeepNado marketing HTML and stylesheet, taking backups. Neither script configures live Stripe payments. Monitoring on the same server still cannot independently detect host-wide or Internet outages.
+
 ## Dark monitoring workspace (v3)
 
 BeepNado's signed-in monitoring UI now uses a compact dark operations layout inspired by modern uptime dashboards while preserving its own branding. It includes searchable/filterable monitors, recent check tick bars **only where actual check records exist**, up/down/pending totals, 30-day check-success statistics, manual checks, monitor creation, and access to incident history and status pages.
