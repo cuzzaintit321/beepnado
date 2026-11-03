@@ -8,12 +8,12 @@ ARCHIVE="$(mktemp "${TMPDIR:-/tmp}/beepnado-update.XXXXXXXX.tar.gz")"
 trap 'rm -f "$ARCHIVE"' EXIT
 cd "$ROOT"
 command -v ssh >/dev/null && command -v scp >/dev/null
-[[ -f app/main.py && -f app/bootstrap_owner.py && -f app/mail_check.py && -f app/static/app.js && -f app/static/index.html ]] || {
+[[ -f app/main.py && -f app/bootstrap_owner.py && -f app/mail_check.py && -f app/static/app.js && -f app/static/index.html && -f app/static/monitor-theme.css && -f app/static/monitor-view.js ]] || {
   echo 'Required BeepNado release files are missing.' >&2; exit 1;
 }
 python3 -m py_compile app/main.py app/bootstrap_owner.py app/mail_check.py
-if command -v node >/dev/null; then node --check app/static/app.js; fi
-tar -czf "$ARCHIVE" app/main.py app/bootstrap_owner.py app/mail_check.py app/static/app.js app/static/index.html
+if command -v node >/dev/null; then node --check app/static/app.js && node --check app/static/monitor-view.js; fi
+tar -czf "$ARCHIVE" app/main.py app/bootstrap_owner.py app/mail_check.py app/static/app.js app/static/index.html app/static/monitor-theme.css app/static/monitor-view.js
 scp "$ARCHIVE" "$HOST:~/beepnado-code-update.tar.gz"
 ssh "$HOST" 'bash -s' <<'REMOTE'
 set -Eeuo pipefail
