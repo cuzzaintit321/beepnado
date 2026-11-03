@@ -30,13 +30,15 @@
     const state = m.last_checked ? (m.state || 'pending') : 'pending';
     const id = num(m.id);
     const pct = m.samples_30d ? `${num(m.success_rate_30d).toFixed(2)}%` : '—';
+    const rules = [m.required_phrase && 'Required phrase', m.expected_status && 'HTTP ' + m.expected_status,
+      m.max_response_ms && '≤ ' + m.max_response_ms + ' ms'].filter(Boolean).join(' · ');
     return `<article class="bn-monitor-row" aria-label="${tidy(m.name)}: ${tidy(prettyState(state))}">
       <div class="bn-monitor-identity"><span class="bn-state-dot bn-${tidy(state)}" aria-hidden="true"></span>
-        <div class="bn-monitor-title"><strong>${tidy(m.name)}</strong><span class="bn-host" title="${tidy(m.url)}">${tidy(m.url)}</span></div></div>
+        <div class="bn-monitor-title"><strong>${tidy(m.name)}</strong><span class="bn-host" title="${tidy(m.url)}">${tidy(m.url)}</span>${rules ? '<span class="bn-host">' + tidy(rules) + '</span>' : ''}</div></div>
       <div class="bn-monitor-meta"><span>${pill(state)}</span><small>${m.last_checked ? 'Checked ' + tidy(fmt(m.last_checked)) : 'Awaiting first check'}</small></div>
       ${recentBars(m)}
       <div class="bn-monitor-metrics"><strong>${pct}</strong><small>30d checks passed</small><span>${m.response_ms == null ? '—' : num(m.response_ms) + ' ms'} latest</span></div>
-      <div class="bn-monitor-actions"><button class="bn-btn bn-btn-small bn-investigate-button" data-investigate="${id}" aria-label="Investigate ${tidy(m.name)}">Investigate ↗</button><button class="bn-btn bn-btn-small" data-check="${id}" aria-label="Check ${tidy(m.name)} now">Check now</button><button class="bn-icon-btn" data-remove="${id}" aria-label="Remove ${tidy(m.name)}" title="Remove monitor">×</button></div>
+      <div class="bn-monitor-actions"><button class="bn-btn bn-btn-small" type="button" data-check-rules="${id}" aria-label="Check rules for ${tidy(m.name)}">Rules</button><button class="bn-btn bn-btn-small bn-investigate-button" data-investigate="${id}" aria-label="Investigate ${tidy(m.name)}">Investigate ↗</button><button class="bn-btn bn-btn-small" data-check="${id}" aria-label="Check ${tidy(m.name)} now">Check now</button><button class="bn-icon-btn" data-remove="${id}" aria-label="Remove ${tidy(m.name)}" title="Remove monitor">×</button></div>
     </article>`;
   }
 
@@ -54,6 +56,9 @@
     if (/ssl|tls|handshake/i.test(err)) return ['HTTPS handshake','An HTTPS connection could not complete.','Inspect reverse-proxy TLS configuration and logs.'];
     if (/ConnectionRefusedError|connection refused/i.test(err)) return ['Connection refused','The network endpoint refused the connection; it may still work externally.','Check the listening port, firewall and router NAT loopback.'];
     if (/timed out|timeout/i.test(err)) return ['Timeout','The check exceeded its timeout.','Inspect network connectivity and server load.'];
+    if (/required phrase|response content|content check|character encoding/i.test(err)) return ['Content check',err,'Open the monitored URL and verify the required phrase appears in the response source.'];
+    if (/^Expected HTTP /i.test(err)) return ['HTTP status mismatch',err,'Check the endpoint or update the expected status.'];
+    if (/^Response too slow:/i.test(err)) return ['Response time exceeded',err,'Review server response times and the configured limit.'];
     if (code>=500) return ['Server-side HTTP '+code,'The endpoint returned a server error.','Check the application and upstream error logs.'];
     if (code===401||code===403) return ['Access restriction','The endpoint returned HTTP '+code+'.','Review authentication and WAF rules.'];
     if (code===404) return ['Missing monitored path','The endpoint returned HTTP 404. Other pages may still work.','Review the path and deployment routes.'];
@@ -63,7 +68,7 @@
   }
   function investigateMonitor(m) {
     const checks=getChecks().filter(c=>Number(c.monitor_id)===Number(m.id)).slice(0,10);
-    const latest=checks[0]||(m.last_checked?m:null);
+    const latest=m.last_checked ? (checks.find(c=>c.region==='primary' && c.checked_at===m.last_checked) || m) : null;
     const hint=investigatorHint(latest);
     let safeUrl=String(m.url||'').split('?')[0];
     try { const u=new URL(m.url); safeUrl=u.origin+u.pathname; } catch(e){}
@@ -127,12 +132,63 @@
       <section class="bn-panel bn-facts"><h3>Check history</h3><div class="bn-fact"><span>30-day check success rate</span><strong>${percent}</strong></div><div class="bn-fact"><span>30-day primary checks</span><strong>${samples.toLocaleString()}</strong></div><div class="bn-fact"><span>Recent incident records</span><strong>${(dash?.incidents || []).length}${(dash?.incidents || []).length === 30 ? '+' : ''}</strong></div><p>Check-based observations, not a time-weighted SLA. No data means no claim of uptime.</p></section>`;
   }
 
+  function ruleFields(m={}, disabled=false) {
+    const off=disabled ? 'disabled' : '';
+    return `<label>Required phrase <small>(optional)</small><input name="required_phrase" maxlength="120" value="${tidy(m.required_phrase)}" placeholder="e.g. Service operational" ${off}></label>
+      <label>Expected HTTP status <small>(optional)</small><input name="expected_status" type="number" min="200" max="599" step="1" value="${tidy(m.expected_status)}" placeholder="e.g. 200" ${off}></label>
+      <label>Maximum response time in ms <small>(optional)</small><input name="max_response_ms" type="number" min="100" max="15000" step="1" value="${tidy(m.max_response_ms)}" placeholder="e.g. 1500" ${off}></label>`;
+  }
+
+  function ruleData(fd) {
+    return {
+      required_phrase: String(fd.get('required_phrase') || '').trim(),
+      expected_status: Number(fd.get('expected_status')) || null,
+      max_response_ms: Number(fd.get('max_response_ms')) || null
+    };
+  }
+
+  const rulesDialog=document.createElement('dialog');
+  rulesDialog.className='bn-investigator-dialog bn-rules-dialog';
+  rulesDialog.setAttribute('aria-labelledby','bn-rules-title');
+  document.body.appendChild(rulesDialog);
+
+  function editRules(m) {
+    rulesDialog.innerHTML=`<div class="bn-investigator-top"><span>MONITOR SETTINGS</span><button type="button" data-close-rules aria-label="Close">×</button></div>
+      <h2 id="bn-rules-title">Check rules</h2><p>${tidy(m.name)}</p>
+      <form class="work-form">${ruleFields(m)}
+        <p class="bn-note">Phrase checks look for case-insensitive text in the first 256 KiB of the HTTP response. Response time is measured through the response headers.</p>
+        <p class="bn-note" role="status"></p>
+        <div class="bn-investigator-actions"><button type="submit" class="bn-btn bn-btn-primary">Save rules</button><button type="button" class="bn-btn bn-btn-quiet" data-close-rules>Cancel</button></div>
+      </form>`;
+    rulesDialog.querySelectorAll('[data-close-rules]').forEach(button=>button.addEventListener('click',()=>rulesDialog.close()));
+    const form=rulesDialog.querySelector('form');
+    form.addEventListener('submit',async e=>{
+      e.preventDefault();
+      const button=form.querySelector('[type="submit"]');
+      button.disabled=true;
+      form.querySelector('[role="status"]').textContent='';
+      try {
+        await api('/api/monitors/'+num(m.id)+'/rules',{method:'PATCH',body:JSON.stringify(ruleData(new FormData(form)))});
+      } catch (error) {
+        form.querySelector('[role="status"]').textContent=error.message;
+        button.disabled=false;
+        return;
+      }
+      rulesDialog.close();
+      toast('Check rules saved');
+      try { dash=await api('/api/dashboard'); renderView(); }
+      catch (error) { toast(error.message); }
+    });
+    rulesDialog.showModal();
+  }
+
   function addForm() {
     const full = getMonitors().length >= num(dash?.limit);
     return `<section class="bn-panel bn-add-panel" id="bn-add-panel"><div class="bn-panel-title"><h3>Add a website</h3><span>+ New</span></div>
       <p>Monitor a public website you own or manage.</p><form class="work-form" id="monitor-form">
         <label>Monitor name<input id="bn-monitor-name" name="name" placeholder="My business website" minlength="2" maxlength="100" required ${full ? 'disabled' : ''}></label>
         <label>Website URL<input name="url" type="url" placeholder="https://example.com" required maxlength="1500" ${full ? 'disabled' : ''}></label>
+        <details><summary>Optional check rules</summary>${ruleFields({},full)}</details>
         <label class="bn-consent"><input type="checkbox" name="authorized" required ${full ? 'disabled' : ''}> I own or am authorized to monitor this site.</label>
         <button class="bn-btn bn-btn-primary bn-btn-wide" type="submit" ${full ? 'disabled' : ''}>+ Add monitor</button>
       </form><p class="bn-note">${full ? 'Plan limit reached. Remove a monitor before adding another.' : 'First check runs automatically. Public HTTP(S) endpoints only; redirects are not followed.'}</p></section>`;
@@ -179,7 +235,7 @@
       const button = form.querySelector('[type="submit"]');
       button.disabled = true;
       try {
-        await api('/api/monitors', {method: 'POST', body: JSON.stringify({name:fd.get('name'),url:fd.get('url'),authorized:fd.get('authorized')==='on'})});
+        await api('/api/monitors', {method: 'POST', body: JSON.stringify({name:fd.get('name'),url:fd.get('url'),authorized:fd.get('authorized')==='on',...ruleData(fd)})});
         toast('Monitor added. First check scheduled.');
         dash = await api('/api/dashboard');
         renderView();
@@ -213,6 +269,11 @@
   main?.addEventListener('click', async e => {
     const button = e.target.closest('button');
     if (!button) return;
+    if (button.hasAttribute('data-check-rules')) {
+      const monitor=getMonitors().find(m=>num(m.id)===num(button.dataset.checkRules));
+      if (monitor) editRules(monitor);
+      return;
+    }
     if (button.hasAttribute('data-investigate')) {
       const monitor=getMonitors().find(m=>Number(m.id)===Number(button.dataset.investigate));
       if(monitor) investigateMonitor(monitor);

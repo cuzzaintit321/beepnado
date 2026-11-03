@@ -6,6 +6,7 @@ separate worker regions. Payment entitlements change only after Stripe webhooks.
 """
 from __future__ import annotations
 import asyncio
+import codecs
 import hashlib
 import hmac
 import ipaddress
@@ -25,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import h11
 from fastapi import FastAPI, HTTPException, Request, Response, Depends
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
@@ -176,6 +178,14 @@ def init_db():
         columns={r['name'] for r in c.execute('PRAGMA table_info(users)')}
         if 'email_verified_at' not in columns:
             c.execute('ALTER TABLE users ADD COLUMN email_verified_at TEXT')
+        monitor_columns = {r['name'] for r in c.execute('PRAGMA table_info(monitors)')}
+        for name, column_type in (
+            ('required_phrase', "TEXT NOT NULL DEFAULT ''"),
+            ('expected_status', 'INTEGER'),
+            ('max_response_ms', 'INTEGER'),
+        ):
+            if name not in monitor_columns:
+                c.execute(f'ALTER TABLE monitors ADD COLUMN {name} {column_type}')
 
 
 def make_password(password: str) -> str:
@@ -344,35 +354,108 @@ async def validate_url(raw):
         raise ValueError(str(exc)) from exc
 
 
-async def probe(url):
-    """Real single-region bounded DNS-pinned HTTP(S) probe, no redirect follows."""
-    started=time.monotonic()
-    writer=None
+CONTENT_LIMIT = 256 * 1024
+
+
+async def response_event(reader, connection):
+    while (event := connection.next_event()) is h11.NEED_DATA:
+        connection.receive_data(await reader.read(8192))
+    return event
+
+
+async def check_required_phrase(reader, connection, response, phrase):
+    headers = dict(response.headers)
+    if headers.get(b'content-encoding', b'identity').lower() != b'identity':
+        return 'Server returned compressed content despite requesting an uncompressed response'
+    charset = re.search(rb'charset\s*=\s*["\']?([a-z0-9_-]+)',
+                        headers.get(b'content-type', b''), re.I)
+    encoding = charset[1].decode('ascii').lower() if charset else 'utf-8'
+    if encoding not in ('utf-8', 'utf8', 'ascii', 'us-ascii', 'latin-1', 'iso-8859-1', 'windows-1252', 'cp1252'):
+        return 'Response character encoding is unsupported for phrase checks'
+    decoder = codecs.getincrementaldecoder(encoding)(errors='replace')
+    needle = phrase.casefold()
+    overlap = ''
+    remaining = CONTENT_LIMIT
     try:
-        host,ip,port,path,scheme=await validate_url(url)
-        target=probe_connection_target(host,ip)
-        context=ssl.create_default_context() if scheme=='https' else None
-        reader,writer=await asyncio.wait_for(asyncio.open_connection(
-            target,port,ssl=context,server_hostname=host if context else None), timeout=8)
-        writer.write((f'GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: BeepNado/0.1\r\nConnection: close\r\n\r\n').encode('ascii'))
-        await asyncio.wait_for(writer.drain(),5)
-        line=await asyncio.wait_for(reader.readline(),8)
-        match=re.match(rb'HTTP/1\.[01] (\d{3})\b',line)
-        if not match: raise ValueError('Invalid HTTP response')
-        code=int(match.group(1)); cert_days=None
+        async with asyncio.timeout(6):
+            while remaining:
+                event = await response_event(reader, connection)
+                if isinstance(event, h11.EndOfMessage):
+                    final_text = overlap + decoder.decode(b'', final=True).casefold()
+                    return None if needle in final_text else 'Required phrase missing from response'
+                if not isinstance(event, h11.Data):
+                    return 'Response ended before the required phrase could be checked'
+                data = event.data[:remaining]
+                remaining -= len(data)
+                text = overlap + decoder.decode(data).casefold()
+                if needle in text:
+                    return None
+                overlap = text[-len(needle):]
+    except TimeoutError:
+        return 'Timed out reading response content'
+    except h11.RemoteProtocolError:
+        return 'Invalid or incomplete HTTP response content'
+    return 'Required phrase not found in the first 256 KiB of response content'
+
+
+async def probe(url, *, required_phrase='', expected_status=None, max_response_ms=None):
+    # DNS-pinned HTTP(S) probe with optional status, latency and content checks.
+    started = time.monotonic()
+    writer = None
+    try:
+        host, ip, port, path, scheme = await validate_url(url)
+        target = probe_connection_target(host, ip)
+        context = ssl.create_default_context() if scheme == 'https' else None
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(
+            target, port, ssl=context, server_hostname=host if context else None), timeout=8)
+        connection = h11.Connection(h11.CLIENT, max_incomplete_event_size=32 * 1024)
+        request = h11.Request(method='GET', target=path, headers=[
+            ('Host', host), ('User-Agent', 'BeepNado/0.1'),
+            ('Accept-Encoding', 'identity'), ('Connection', 'close'),
+        ])
+        writer.write(connection.send(request) + connection.send(h11.EndOfMessage()))
+        await asyncio.wait_for(writer.drain(), 5)
+        async with asyncio.timeout(8):
+            response = await response_event(reader, connection)
+            while isinstance(response, h11.InformationalResponse) and response.status_code != 101:
+                response = await response_event(reader, connection)
+        if not isinstance(response, h11.Response):
+            raise ValueError('Invalid or unsupported HTTP response')
+
+        code = response.status_code
+        response_ms = int((time.monotonic() - started) * 1000)
+        cert_days = None
         if context:
-            obj=writer.get_extra_info('ssl_object')
-            cert=obj.getpeercert() if obj else None
+            obj = writer.get_extra_info('ssl_object')
+            cert = obj.getpeercert() if obj else None
             if cert and cert.get('notAfter'):
-                cert_days=int((ssl.cert_time_to_seconds(cert['notAfter'])-time.time())//86400)
-        return dict(state='up' if code<400 else 'down',http_code=code,response_ms=int((time.monotonic()-started)*1000),cert_days=cert_days,error=None if code<400 else f'HTTP {code}')
+                cert_days = int((ssl.cert_time_to_seconds(cert['notAfter']) - time.time()) // 86400)
+        error = None
+        if expected_status is not None and code != expected_status:
+            error = f'Expected HTTP {expected_status}, received HTTP {code}'
+        elif expected_status is None and code >= 400:
+            error = f'HTTP {code}'
+        elif required_phrase and 300 <= code < 400:
+            error = 'Content check reached a redirect. Monitor the destination URL directly'
+        elif max_response_ms is not None and response_ms > max_response_ms:
+            error = f'Response too slow: {response_ms} ms exceeds {max_response_ms} ms'
+        elif required_phrase:
+            error = await check_required_phrase(reader, connection, response, required_phrase)
+        return dict(state='down' if error else 'up', http_code=code,
+                    response_ms=response_ms, cert_days=cert_days, error=error)
+    except (h11.RemoteProtocolError, h11.LocalProtocolError):
+        return dict(state='down', http_code=None, response_ms=None,
+                    cert_days=None, error='Invalid HTTP request or response')
     except Exception as exc:
-        return dict(state='down',http_code=None,response_ms=None,cert_days=None,error=f'{type(exc).__name__}: {str(exc)[:90]}')
+        return dict(state='down', http_code=None, response_ms=None,
+                    cert_days=None, error=f'{type(exc).__name__}: {str(exc)[:90]}')
     finally:
         if writer:
             writer.close()
-            try: await asyncio.wait_for(writer.wait_closed(),2)
-            except Exception: pass
+            try:
+                await asyncio.wait_for(writer.wait_closed(), 2)
+            except Exception:
+                pass
 
 
 probe_locks = {}
@@ -391,11 +474,13 @@ def record_check(monitor_id, result, region='primary'):
                     VALUES(?,?,?,?,?,?,?,?)''',(monitor_id,region,timestamp,state,result['http_code'],result['response_ms'],result['cert_days'],result['error']))
         incident=c.execute('SELECT id FROM incidents WHERE monitor_id=? AND resolved_at IS NULL ORDER BY id DESC LIMIT 1',(monitor_id,)).fetchone()
         if state=='down' and not incident:
-            c.execute('INSERT INTO incidents(monitor_id,opened_at,summary) VALUES(?,?,?)',(monitor_id,timestamp,f'{m["name"]} is not responding'))
+            reason = result['error'] or 'Check failed'
+            summary = f'{m["name"]} failed its monitoring checks'
+            c.execute('INSERT INTO incidents(monitor_id,opened_at,summary) VALUES(?,?,?)',(monitor_id,timestamp,summary))
             c.execute('INSERT INTO notifications(user_id,monitor_id,kind,message,created_at) VALUES(?,?,?,?,?)',
-                      (m['user_id'],monitor_id,'outage',f'{m["name"]}: outage confirmed after two failed checks',timestamp))
+                      (m['user_id'],monitor_id,'outage',f'{m["name"]}: {reason}',timestamp))
             enqueue_alert(c,m['user_id'],'BeepNado outage: '+m['name'],
-                          f'An outage was confirmed for {m["name"]} after two failed checks at {timestamp} UTC.\nLog in to {SITE_URL} to investigate.')
+                          f'Two checks failed for {m["name"]} at {timestamp} UTC.\nLatest result: {reason}\nLog in to {SITE_URL} to investigate.')
         elif state=='up' and incident:
             c.execute('UPDATE incidents SET resolved_at=? WHERE id=?',(timestamp,incident['id']))
             c.execute('INSERT INTO notifications(user_id,monitor_id,kind,message,created_at) VALUES(?,?,?,?,?)',
@@ -409,9 +494,13 @@ async def check_monitor(monitor_id):
     lock=probe_locks.setdefault(monitor_id,asyncio.Lock())
     async with lock:
         with db() as c:
-            mon=c.execute('SELECT m.url ' + ACTIVE_MONITORS + ' AND m.id=?',(monitor_id,)).fetchone()
+            mon=c.execute('SELECT m.url,m.required_phrase,m.expected_status,m.max_response_ms ' +
+                          ACTIVE_MONITORS + ' AND m.id=?',(monitor_id,)).fetchone()
         if not mon:return None
-        return record_check(monitor_id,await probe(mon['url']))
+        return record_check(monitor_id, await probe(
+            mon['url'], required_phrase=mon['required_phrase'],
+            expected_status=mon['expected_status'], max_response_ms=mon['max_response_ms'],
+        ))
 
 
 async def scheduler():
@@ -696,7 +785,16 @@ def dashboard(user=Depends(require_user)):
     return {'monitors':monitors,'checks':checks,'incidents':incidents,'notifications':notices,'status_page':dict(page) if page else None,'plan':user['plan'],'limit':PLAN_LIMITS[user['plan']]}
 
 
-class MonitorInput(BaseModel):
+class CheckRules(BaseModel):
+    required_phrase: str = Field(default='', max_length=120)
+    expected_status: int | None = Field(default=None, ge=200, le=599)
+    max_response_ms: int | None = Field(default=None, ge=100, le=15000)
+
+    def values(self):
+        return self.required_phrase.strip(), self.expected_status, self.max_response_ms
+
+
+class MonitorInput(CheckRules):
     name:str=Field(min_length=2,max_length=100)
     url:str=Field(min_length=10,max_length=1500)
     authorized:bool
@@ -713,8 +811,43 @@ async def add_monitor(input:MonitorInput,user=Depends(require_csrf)):
         if not current:raise HTTPException(401,'Sign in to continue')
         count=c.execute('SELECT COUNT(*) FROM monitors WHERE user_id=?',(user['id'],)).fetchone()[0]
         if count>=PLAN_LIMITS[current['plan']]:raise HTTPException(403,'Plan monitor limit reached')
-        cur=c.execute('INSERT INTO monitors(user_id,name,url,created_at) VALUES(?,?,?,?)',(user['id'],input.name.strip(),input.url.strip(),now()))
+        cur=c.execute(
+            '''INSERT INTO monitors(user_id,name,url,created_at,required_phrase,expected_status,max_response_ms)
+               VALUES(?,?,?,?,?,?,?)''',
+            (user['id'], input.name.strip(), input.url.strip(), now(), *input.values()),
+        )
         return {'id':cur.lastrowid,'ok':True}
+
+
+@app.patch('/api/monitors/{monitor_id}/rules')
+async def update_monitor_rules(monitor_id: int, input: CheckRules, user=Depends(require_csrf)):
+    with db() as c:
+        if not c.execute('SELECT 1 FROM monitors WHERE id=? AND user_id=?',
+                         (monitor_id, user['id'])).fetchone():
+            raise HTTPException(404, 'Monitor not found')
+    # Let any in-flight check finish before invalidating its latest state.
+    lock = probe_locks.setdefault(monitor_id, asyncio.Lock())
+    async with lock:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            previous = c.execute(
+                '''SELECT required_phrase,expected_status,max_response_ms
+                   FROM monitors WHERE id=? AND user_id=?''', (monitor_id, user['id']),
+            ).fetchone()
+            if previous is None:
+                raise HTTPException(404, 'Monitor not found')
+            rules = tuple(
+                value if field in input.model_fields_set else previous[field]
+                for field, value in zip(('required_phrase', 'expected_status', 'max_response_ms'), input.values())
+            )
+            if tuple(previous) != rules:
+                c.execute(
+                    '''UPDATE monitors SET required_phrase=?,expected_status=?,max_response_ms=?,
+                       last_checked=NULL,state='pending',consecutive_failures=0,
+                       http_code=NULL,response_ms=NULL,cert_days=NULL,error=NULL WHERE id=? AND user_id=?''',
+                    (*rules, monitor_id, user['id']),
+                )
+    return {'ok': True}
 
 
 @app.delete('/api/monitors/{monitor_id}')

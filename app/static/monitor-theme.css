@@ -184,3 +184,13 @@
 
 /* FAQ was removed from marketing; hide any stale injected copy from cached scripts. */
 #faq,.beep-faq{display:none!important}
+
+/* Configurable check rules */
+.bn-monitor-actions{flex-wrap:wrap}
+.bn-add-panel .work-form details{display:grid;gap:8px}
+.bn-add-panel .work-form details label{margin-top:10px}
+.bn-add-panel .work-form summary{cursor:pointer;color:#c2d0e1;font-size:12px;font-weight:700}
+.bn-rules-dialog .work-form{max-width:none}
+.bn-rules-dialog .work-form label{color:#c2d0e1}
+.bn-rules-dialog .work-form input{width:100%;background:#152439;border-color:#3d526c;color:#f1f6ff}
+.bn-rules-dialog .work-form input:focus-visible{outline:2px solid #ffa78f;outline-offset:2px}
