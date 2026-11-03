@@ -1,0 +1,88 @@
+.feature-card,.price-card {
+  cursor:pointer;
+  transition:transform .25s,box-shadow .25s,border-color .25s;
+}
+.feature-card:hover,.price-card:hover,
+.feature-card:focus-visible,.price-card:focus-visible {
+  transform:translateY(-6px);
+  border-color:#ff997d;
+  box-shadow:0 18px 40px #4a264522;
+  outline-offset:3px;
+}
+.feature-card:after {
+  content:"Explore feature ↗";
+  display:block;
+  color:#dc6b56;
+  font-size:12px;
+  font-weight:800;
+  margin-top:18px;
+}
+.beep-demo {
+  padding:90px 24px;
+  background:linear-gradient(130deg,#171126,#422847);
+  color:white;
+  text-align:center;
+}
+.beep-demo h2 {
+  font-size:clamp(34px,5vw,55px);
+  letter-spacing:-2px;
+}
+.beep-demo p {color:#dac9db}
+.beep-demo button {
+  border:1px solid #98718e;
+  border-radius:30px;
+  background:#37263f;
+  color:white;
+  padding:13px 23px;
+  margin:8px;
+  cursor:pointer;
+}
+.beep-demo button.active {
+  background:#ffbe85;
+  color:#271a33;
+}
+.beep-preview {
+  max-width:800px;
+  margin:28px auto;
+  padding:35px;
+  background:#271c35;
+  border:1px solid #80617b;
+  border-radius:18px;
+}
+.beep-preview strong {
+  font-size:27px;
+  color:#7de9b7;
+}
+.beep-dialog {
+  border:0;
+  border-radius:18px;
+  padding:35px;
+  width:min(510px,calc(100% - 30px));
+}
+.beep-dialog::backdrop {
+  background:#120d22bb;
+}
+.beep-dialog p {line-height:1.7}
+.beep-dialog button {
+  padding:12px 25px;
+  background:#ffbc83;
+  border:0;
+  border-radius:9px;
+  cursor:pointer;
+}
+.beep-faq {
+  max-width:880px;
+  margin:auto;
+  padding:80px 25px;
+}
+.beep-faq details {
+  padding:22px 0;
+  border-bottom:1px solid #e5deea;
+}
+.beep-faq summary {
+  font-weight:800;
+  cursor:pointer;
+}
+@media(prefers-reduced-motion:reduce) {
+  .feature-card,.price-card {transition:none}
+}
