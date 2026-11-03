@@ -388,20 +388,33 @@ async def scheduler():
                     try: await check_monitor(i)
                     except Exception as exc: print('Check error',i,type(exc).__name__,flush=True)
             await asyncio.gather(*(run(i) for i in due))
-            await asyncio.to_thread(send_pending_alerts)
         except asyncio.CancelledError:raise
         except Exception as exc: print('Scheduler error',type(exc).__name__,flush=True)
         await asyncio.sleep(10)
 
 
+async def email_delivery_scheduler():
+    """Keep slow or unavailable SMTP from delaying primary website checks."""
+    await asyncio.sleep(5)
+    while True:
+        try:
+            await asyncio.to_thread(send_pending_alerts)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print('Mail scheduler error:', type(exc).__name__, flush=True)
+        await asyncio.sleep(15)
+
+
 @asynccontextmanager
 async def lifespan(app):
     init_db()
-    task=asyncio.create_task(scheduler())
-    yield
-    task.cancel()
-    try: await task
-    except asyncio.CancelledError: pass
+    tasks=[asyncio.create_task(scheduler()), asyncio.create_task(email_delivery_scheduler())]
+    try:
+        yield
+    finally:
+        for task in tasks: task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 app=FastAPI(title='BeepNado SaaS',docs_url=None,redoc_url=None,openapi_url=None,lifespan=lifespan)
@@ -440,6 +453,16 @@ def public_availability():
 
 @app.get('/health')
 def health():return {'ok':True,'name':'BeepNado'}
+
+
+@app.get('/health/ready')
+def ready():
+    """Ready only when the persistent database is accessible."""
+    try:
+        with db() as c: c.execute('SELECT 1').fetchone()
+    except (sqlite3.Error, OSError):
+        raise HTTPException(503,'Database unavailable')
+    return {'ok':True, 'database':'ready'}
 
 
 @app.get('/')
@@ -599,6 +622,18 @@ def dashboard(user=Depends(require_user)):
                 FROM notifications n JOIN monitors m ON m.id=n.monitor_id
                 WHERE n.user_id=? ORDER BY n.id DESC LIMIT 60''',(user['id'],))]
         page=c.execute('SELECT slug,title FROM status_pages WHERE user_id=?',(user['id'],)).fetchone()
+        # These are primary-check success rates, not time-weighted uptime or an SLA.
+        cutoff=(datetime.now(timezone.utc)-timedelta(days=30)).isoformat(timespec='seconds')
+        samples={r['monitor_id']:r for r in c.execute('''
+            SELECT ch.monitor_id, COUNT(*) AS total,
+                   SUM(CASE WHEN ch.state='up' THEN 1 ELSE 0 END) AS passed
+              FROM checks ch JOIN monitors m ON m.id=ch.monitor_id
+             WHERE m.user_id=? AND ch.region='primary' AND ch.checked_at>=?
+             GROUP BY ch.monitor_id''',(user['id'],cutoff))}
+        for mon in monitors:
+            stat=samples.get(mon['id'])
+            mon['samples_30d']=int(stat['total']) if stat else 0
+            mon['success_rate_30d']=round(100*stat['passed']/stat['total'],2) if stat and stat['total'] else None
     return {'monitors':monitors,'checks':checks,'incidents':incidents,'notifications':notices,'status_page':dict(page) if page else None,'plan':user['plan'],'limit':PLAN_LIMITS[user['plan']]}
 
 
