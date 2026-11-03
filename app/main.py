@@ -492,7 +492,7 @@ def home():return FileResponse(ROOT/'static'/'index.html')
 
 @app.get('/static/{filename}')
 def static(filename:str):
-    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js'):raise HTTPException(404)
+    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js'):raise HTTPException(404)
     return FileResponse(ROOT/'static'/filename)
 
 
