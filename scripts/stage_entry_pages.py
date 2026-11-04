@@ -8,11 +8,12 @@ HERO = r'<div class="hero-copy">.*?(?=<div class="hero-visual">)'
 TITLE = r'<title>[^<]+</title>'
 DESCRIPTION = r'<meta name="description"[^>]+>'
 PUBLIC_HEAD_TAGS = (
-    TITLE, DESCRIPTION, r'<link rel="canonical"[^>]+>',
+    TITLE, DESCRIPTION, r'<link rel="canonical"[^>]+>', r'<link rel="icon"[^>]+>',
     *(rf'<meta property="og:{field}"[^>]+>' for field in ('type', 'site_name', 'url', 'title', 'description')),
     r'<script id="beepnado-website-schema"[^>]*>.*?</script>',
 )
 GUIDE_LINK = r'<a href="/guides/check-website-downtime/">[^<]+</a>'
+AGENCY_LINK = r'<a href="/website-monitoring-for-agencies/">[^<]+</a>'
 ENTRY = r'<p id="app-loading".*?(?=<section id="account-screen")'
 OLD_APP_MARKETING = r'<header class="nav">.*?</main>\s*(?=<section id="account-screen")'
 APP_BACK = r'<button\b[^>]*\bid="account-back"[^>]*>.*?</button>'
@@ -43,6 +44,10 @@ def stage_public(previous, release):
         pricing_link = matched(r'<a href="#pricing">Pricing</a>(?=</span></footer>)', previous)
         previous = previous.replace(pricing_link + '</span></footer>',
                                     pricing_link + ' · ' + matched(GUIDE_LINK, release) + '</span></footer>', 1)
+    if not re.search(AGENCY_LINK, previous):
+        guide_link = matched(GUIDE_LINK + r'(?=</span></footer>)', previous)
+        previous = previous.replace(guide_link + '</span></footer>',
+                                    guide_link + ' · ' + matched(AGENCY_LINK, release) + '</span></footer>', 1)
     return previous
 
 
@@ -66,11 +71,16 @@ def stage_workspace(previous, release):
 
 
 if __name__ == '__main__':
-    release, workspace, public, staged_public = map(Path, sys.argv[1:])
+    public_only = sys.argv[1] == '--public-only'
     try:
-        updated_app = stage_workspace(workspace.read_text(), (release / 'app/static/index.html').read_text())
+        if public_only:
+            release, public, staged_public = map(Path, sys.argv[2:])
+        else:
+            release, workspace, public, staged_public = map(Path, sys.argv[1:])
         updated_public = stage_public(public.read_text(), (release / 'public/index.html').read_text())
+        if not public_only:
+            updated_app = stage_workspace(workspace.read_text(), (release / 'app/static/index.html').read_text())
+            workspace.write_text(updated_app)
+        staged_public.write_text(updated_public)
     except ValueError as exc:
         raise SystemExit(f'Could not stage entry pages: {exc}') from None
-    workspace.write_text(updated_app)
-    staged_public.write_text(updated_public)

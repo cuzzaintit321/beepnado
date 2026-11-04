@@ -1,17 +1,99 @@
 #!/usr/bin/env bash
-# Apply the monitoring release on yeet and verify it through the existing proxy.
+# Apply the release on yeet. Pass --public-only to publish marketing files without a restart.
 set -Eeuo pipefail
 release="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 app="$HOME/beepnado"
 state="$HOME/.local/state/beepnado"
 public_root="$HOME/portfolio/site/beepnado"
 public_page="$public_root/index.html"
-public_assets=(robots.txt sitemap.xml guides/check-website-downtime/index.html static/guide.css)
-[[ -f "$app/compose.yaml" && -f "$app/.env" && -f "$public_page" ]] || { echo 'BeepNado application or public homepage missing.' >&2; exit 1; }
+public_assets=(static/favicon-96.png static/guide.css guides/check-website-downtime/index.html
+    website-monitoring-for-agencies/index.html robots.txt sitemap.xml)
+[[ -d "$app" && -f "$public_page" ]] || { echo 'BeepNado site paths missing.' >&2; exit 1; }
 umask 077
 mkdir -p "$state"
 exec 9>"$app/.enable-signup.lock"
 flock -n 9 || { echo 'Another BeepNado setup is running.' >&2; exit 1; }
+
+public_caddy() {
+    curl -fsS --max-time 12 --resolve beepnado.com:443:127.0.0.1 "https://beepnado.com$1"
+}
+
+publish_public() {
+    local source="$1" target="$2" temporary
+    temporary="$(mktemp "$(dirname -- "$target")/.beepnado.XXXXXXXX")"
+    cp -p -- "$source" "$temporary"
+    mv -f -- "$temporary" "$target"
+}
+
+backup_public_files() {
+    cp -p -- "$public_page" "$backup/public-before.html"
+    mkdir "$backup/public-assets"
+    for file in "${public_assets[@]}"; do
+        [[ -f "$release/public/$file" ]]
+        if [[ -e "$public_root/$file" ]]; then
+            [[ -f "$public_root/$file" ]] || { echo "Unexpected path $public_root/$file" >&2; exit 1; }
+            (cd "$public_root" && cp -p --parents -- "$file" "$backup/public-assets")
+        fi
+    done
+}
+
+restore_public_files() {
+    if ! cmp -s "$backup/public-before.html" "$public_page"; then
+        publish_public "$backup/public-before.html" "$public_page"
+    fi
+    for file in "${public_assets[@]}"; do
+        if [[ -f "$backup/public-assets/$file" ]]; then
+            publish_public "$backup/public-assets/$file" "$public_root/$file"
+        else
+            rm -f -- "$public_root/$file"
+        fi
+    done
+}
+
+publish_public_files() {
+    for file in "${public_assets[@]}"; do
+        (umask 022; mkdir -p -- "$(dirname -- "$public_root/$file")")
+        publish_public "$release/public/$file" "$public_root/$file"
+    done
+    if ! cmp -s "$backup/public-after.html" "$public_page"; then
+        chmod --reference="$backup/public-before.html" "$backup/public-after.html"
+        publish_public "$backup/public-after.html" "$public_page"
+    fi
+}
+
+verify_public_files() {
+    public_caddy / >"$backup/served-public.html"
+    cmp "$public_page" "$backup/served-public.html"
+    for file in "${public_assets[@]}"; do
+        public_caddy "/${file%index.html}" >"$backup/served-seo-asset"
+        cmp "$release/public/$file" "$backup/served-seo-asset"
+    done
+}
+
+if [[ "${1:-}" == --public-only && $# == 1 ]]; then
+    backup="$(mktemp -d "$state/marketing-backup.XXXXXXXX")"
+    backup_public_files
+    python3 "$release/scripts/stage_entry_pages.py" --public-only "$release" \
+        "$backup/public-before.html" "$backup/public-after.html"
+    rollback_public() {
+        trap - ERR INT TERM
+        echo "Restore from $backup" >&2
+        restore_public_files
+        exit 1
+    }
+    trap rollback_public ERR INT TERM
+    publish_public_files
+    verify_public_files
+    trap - ERR INT TERM
+    echo 'Public SEO files deployed and verified through Caddy.'
+    echo "Backup: $backup"
+    exit
+fi
+if (( $# != 0 )); then
+    echo 'Usage: deploy_heartbeat.sh [--public-only]' >&2
+    exit 2
+fi
+[[ -f "$app/compose.yaml" && -f "$app/.env" ]] || { echo 'BeepNado application files missing.' >&2; exit 1; }
 cd "$app"
 
 expect_release_file() {
@@ -42,15 +124,7 @@ fi
 backup="$(mktemp -d "$state/monitoring-backup.XXXXXXXX")"
 files=(app/main.py app/static/index.html app/static/app.js app/static/monitor-view.js app/static/monitor-theme.css requirements.txt)
 cp -p --parents -- "${files[@]}" "$backup"
-cp -p -- "$public_page" "$backup/public-before.html"
-mkdir "$backup/public-assets"
-for file in "${public_assets[@]}"; do
-    [[ -f "$release/public/$file" ]]
-    if [[ -e "$public_root/$file" ]]; then
-        [[ -f "$public_root/$file" ]] || { echo "Unexpected path $public_root/$file" >&2; exit 1; }
-        (cd "$public_root" && cp -p --parents -- "$file" "$backup/public-assets")
-    fi
-done
+backup_public_files
 # Patch only the status rendering in app.js, preserving locally deployed billing and signup behavior.
 patch_file="$backup/public-status.patch"
 cat >"$patch_file" <<'PUBLIC_STATUS_PATCH'
@@ -121,9 +195,6 @@ caddy() {
     shift
     curl -fsS --max-time 12 --resolve app.beepnado.com:443:127.0.0.1 "$@" "https://app.beepnado.com$path"
 }
-public_caddy() {
-    curl -fsS --max-time 12 --resolve beepnado.com:443:127.0.0.1 "https://beepnado.com$1"
-}
 caddy /api/availability >"$backup/availability.json"
 docker compose exec -T web python -c '
 from contextlib import closing
@@ -141,27 +212,11 @@ with tempfile.TemporaryDirectory() as tmp:
         shutil.copyfileobj(data, sys.stdout.buffer)
 ' >"$backup/before-monitoring.sqlite3"
 
-publish_public() {
-    local source="$1" target="$2" temporary
-    temporary="$(mktemp "$(dirname -- "$target")/.beepnado.XXXXXXXX")"
-    cp -p -- "$source" "$temporary"
-    mv -f -- "$temporary" "$target"
-}
-
 rollback() {
     trap - ERR INT TERM
     echo "Restore from $backup" >&2
     for file in "${files[@]}"; do cp -p -- "$backup/$file" "$file"; done
-    if ! cmp -s "$backup/public-before.html" "$public_page"; then
-        publish_public "$backup/public-before.html" "$public_page"
-    fi
-    for file in "${public_assets[@]}"; do
-        if [[ -f "$backup/public-assets/$file" ]]; then
-            publish_public "$backup/public-assets/$file" "$public_root/$file"
-        else
-            rm -f -- "$public_root/$file"
-        fi
-    done
+    restore_public_files
     if [[ -f "$backup/staged-main.py" ]]; then cp -p -- "$backup/staged-main.py" "$staged_main"; fi
     docker compose up -d --no-deps --build web || true
     exit 1
@@ -169,14 +224,7 @@ rollback() {
 trap rollback ERR INT TERM
 cp -- "$ui/app/static/app.js" app/static/app.js
 cp -- "$ui/app/static/index.html" app/static/index.html
-if ! cmp -s "$backup/public-after.html" "$public_page"; then
-    chmod --reference="$backup/public-before.html" "$backup/public-after.html"
-    publish_public "$backup/public-after.html" "$public_page"
-fi
-for file in "${public_assets[@]}"; do
-    (umask 022; mkdir -p -- "$(dirname -- "$public_root/$file")")
-    publish_public "$release/public/$file" "$public_root/$file"
-done
+publish_public_files
 cp -- "$release/app/main.py" app/main.py
 cp -- "$release/app/static/monitor-view.js" app/static/monitor-view.js
 cp -- "$release/requirements.txt" requirements.txt
@@ -197,12 +245,7 @@ caddy /health/ready >/dev/null
 caddy / -D "$backup/workspace-headers.txt" >"$backup/served-workspace.html"
 grep -Eiq '^x-robots-tag:[[:space:]]*noindex[[:space:]]*$' "$backup/workspace-headers.txt"
 cmp app/static/index.html "$backup/served-workspace.html"
-public_caddy / >"$backup/served-public.html"
-cmp "$public_page" "$backup/served-public.html"
-for file in "${public_assets[@]}"; do
-    public_caddy "/${file%index.html}" >"$backup/served-seo-asset"
-    cmp "$release/public/$file" "$backup/served-seo-asset"
-done
+verify_public_files
 status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 12 --resolve app.beepnado.com:443:127.0.0.1 -X POST https://app.beepnado.com/api/heartbeat)"
 [[ "$status" == 401 ]]
 caddy /static/app.js >"$backup/served-app.js"
