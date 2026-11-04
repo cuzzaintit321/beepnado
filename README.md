@@ -41,6 +41,20 @@ With `WORKER_ALERT_EMAIL` and TLS SMTP configured on the worker, two consecutive
 
 To see public observations beside primary checks, set `BEEPNADO_URL` and a random `WORKER_TOKEN` in `.worker.env`. Set the same token on the main server and recreate its web container. The token grants access to active website target URLs, so give it only to a trusted worker. The public probes measure ordinary HTTP(S) availability. Your primary check rules and incident state are tracked separately. The dashboard marks public samples over 15 minutes old as stale and displays observations from the past hour.
 
+## Website and network monitors
+
+The Add monitor menu supports website and heartbeat monitors and these public checks:
+
+- **JSON API** sends a GET request and validates the expected HTTP status and JSON. An optional JSON Pointer can verify a scalar value.
+- **DNS record** checks A, AAAA, CNAME, MX, NS, TXT or CAA through Google Public DNS, with an optional expected answer.
+- **SSL certificate** validates the hostname and certificate chain and checks the expiry threshold once an hour.
+- **Domain expiry** checks registration expiry through the registry's HTTPS RDAP service every six hours. If the registry does not provide an expiry date, the check is inconclusive.
+- **ICMP ping**, **TCP port** and **UDP reply** check public hosts. UDP requires an actual reply to a request of 1–128 bytes and can match a reply prefix.
+
+The Compose files permit ICMP datagram sockets for the BeepNado group without granting raw-socket capability. New workers can report the network types to the dashboard. Existing workers continue to receive website monitors.
+
+For an ambiguous network failure, the primary or remote probe checks public HTTPS connectivity to two independent reference hosts. If neither answers, the failed probe is inconclusive and cannot open or close an incident. An off-site worker and its independent alerting can detect when a site on the primary server's internet connection becomes unreachable.
+
 ## Planned maintenance
 
 Open **Maintenance** on a website monitor to start a window now or schedule one in your local time. The checks keep running at the usual interval, and the dashboard marks those results in the check history. During the window BeepNado suppresses outage and recovery alerts for that monitor and excludes the planned checks from its success rate. A public status page shows the upcoming or active window. End it early from the same dialog to resume normal alerting at the next check.

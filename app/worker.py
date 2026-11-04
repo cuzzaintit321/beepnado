@@ -10,7 +10,8 @@ import sqlite3
 import time
 from urllib.parse import urlsplit
 
-from .main import email_ready, now, probe, send_email
+from .main import account_for_probe_network, email_ready, now, probe, run_probe, send_email
+from .network_checks import EXPIRY_INTERVALS
 
 RESERVED_REGIONS = {'primary', 'maintenance', 'heartbeat'}
 
@@ -86,6 +87,11 @@ def record_watch(path, url, result, recipient, region):
     with closing(open_state(path)) as db, db:
         row = db.execute('SELECT state, failures FROM watch_state WHERE url=?', (url,)).fetchone()
         previous = row['state'] if row else 'pending'
+        if result['state'] == 'unknown':
+            if row and previous != 'down':
+                db.execute('UPDATE watch_state SET failures=0 WHERE url=?', (url,))
+            print(f"{now()} {region} {urlsplit(url).hostname}: check inconclusive", flush=True)
+            return
         failures = 0 if result['state'] == 'up' else min(2, (row['failures'] if row else 0) + 1)
         state = 'up' if not failures else 'down' if failures >= 2 else previous
         db.execute('''INSERT INTO watch_state(url,state,failures) VALUES(?,?,?)
@@ -129,7 +135,7 @@ async def watch_once(path, urls, recipient, region):
 
     async def check(url):
         async with semaphore:
-            result = await probe(url, public_only=True)
+            result = await account_for_probe_network(await probe(url, public_only=True))
             await asyncio.to_thread(record_watch, path, url, result, recipient, region)
 
     await asyncio.gather(*(check(url) for url in urls))
@@ -139,20 +145,34 @@ async def send_pending(path):
     await asyncio.to_thread(deliver_alerts, path)
 
 
-async def sync_once(base, token, region):
-    targets = await asyncio.to_thread(dashboard_request, base, token, '/internal/targets')
+async def sync_once(base, token, region, expiry_checks=None):
+    targets = await asyncio.to_thread(dashboard_request, base, token, '/internal/targets?typed=true')
     semaphore = asyncio.Semaphore(8)
+    active = targets.get('targets', [])
+    if expiry_checks is None:
+        expiry_checks = {}
+    active_ids = {target['id'] for target in active}
+    for monitor_id in set(expiry_checks) - active_ids:
+        del expiry_checks[monitor_id]
 
     async def report(target):
+        kind = target.get('kind', 'http')
+        monitor_id = target['id']
+        if kind in EXPIRY_INTERVALS and time.monotonic() < expiry_checks.get(monitor_id, 0):
+            return
         async with semaphore:
-            result = await probe(target['url'], public_only=True)
+            result = await run_probe(target['url'], kind, target.get('config', {}), public_only=True)
+            result = await account_for_probe_network(result)
             try:
                 await asyncio.to_thread(dashboard_request, base, token, '/internal/result',
-                                        {'monitor_id': target['id'], 'region': region, **result})
+                                        {'monitor_id': monitor_id, 'region': region, **result})
             except (OSError, ValueError) as exc:
                 print(f'Worker result could not sync: {type(exc).__name__}', flush=True)
+            else:
+                if kind in EXPIRY_INTERVALS:
+                    expiry_checks[monitor_id] = time.monotonic() + EXPIRY_INTERVALS[kind]
 
-    await asyncio.gather(*(report(target) for target in targets.get('targets', [])))
+    await asyncio.gather(*(report(target) for target in active))
 
 
 async def periodic(interval, task, *args):
@@ -178,7 +198,7 @@ async def main():
         if recipient:
             loops.append(periodic(15, send_pending, path))
     if base:
-        loops.append(periodic(interval, sync_once, base, token, region))
+        loops.append(periodic(interval, sync_once, base, token, region, {}))
     await asyncio.gather(*loops)
 
 

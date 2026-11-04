@@ -9,6 +9,8 @@ services:
     volumes:
       - worker-state:/data
     cap_drop: [ALL]
+    sysctls:
+      net.ipv4.ping_group_range: "10002 10002"
     security_opt: [no-new-privileges:true]
 volumes:
   worker-state:

@@ -11,13 +11,13 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import os
 import re
 import smtplib
 from email.message import EmailMessage
 from email.utils import formatdate
 import secrets
-import socket
 import sqlite3
 import ssl
 import time
@@ -30,6 +30,11 @@ import h11
 from fastapi import FastAPI, HTTPException, Request, Response, Depends
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from pydantic import AwareDatetime, BaseModel, Field
+
+from .network_checks import (
+    EXPIRY_INTERVALS, NetworkInput, check_hex, normalize_dns, probe_network,
+    public_hostname, resolve_public, result as network_result,
+)
 
 ROOT = Path(__file__).resolve().parent
 DB_PATH = os.getenv('DATABASE_PATH', '/data/beepnado.sqlite3')
@@ -192,6 +197,9 @@ def init_db():
             ('expected_status', 'INTEGER'),
             ('max_response_ms', 'INTEGER'),
             ('maintenance_last_checked', 'TEXT'),
+            ('probe_kind', "TEXT NOT NULL DEFAULT 'http'"),
+            ('probe_config', "TEXT NOT NULL DEFAULT '{}'"),
+            ('detail', 'TEXT'),
             ('heartbeat_token_hash', 'TEXT'),
             ('heartbeat_interval_s', 'INTEGER'),
             ('heartbeat_grace_s', 'INTEGER'),
@@ -200,6 +208,12 @@ def init_db():
         ):
             if name not in monitor_columns:
                 c.execute(f'ALTER TABLE monitors ADD COLUMN {name} {column_type}')
+        if 'detail' not in {r['name'] for r in c.execute('PRAGMA table_info(checks)')}:
+            c.execute('ALTER TABLE checks ADD COLUMN detail TEXT')
+        incident_columns = {r['name'] for r in c.execute('PRAGMA table_info(incidents)')}
+        for column in ('opening_evidence', 'recovery_evidence'):
+            if column not in incident_columns:
+                c.execute(f'ALTER TABLE incidents ADD COLUMN {column} TEXT')
         c.execute('CREATE UNIQUE INDEX IF NOT EXISTS heartbeat_token ON monitors(heartbeat_token_hash)')
         c.execute('''CREATE INDEX IF NOT EXISTS heartbeat_due ON monitors(heartbeat_due_at)
                      WHERE heartbeat_interval_s IS NOT NULL AND state!='down' ''')
@@ -344,24 +358,13 @@ async def validate_url(raw):
     """Reject private targets, credentials, redirects, custom ports, DNS rebinding."""
     try:
         u = urlsplit(raw)
-        if u.scheme not in ('http','https') or not u.hostname or u.username or u.password or u.fragment or any(ord(ch)<32 for ch in raw):
+        if u.scheme not in ('http','https') or not u.hostname or u.username is not None or u.password is not None or u.fragment or any(ord(ch)<32 for ch in raw):
             raise ValueError('Enter a public HTTP or HTTPS URL without credentials or fragments')
         if u.port not in (None, 80 if u.scheme=='http' else 443):
             raise ValueError('Only standard 80/443 ports are supported')
-        host = u.hostname.lower().rstrip('.')
-        if len(host)>253 or not re.fullmatch(r'[a-z0-9-]+(?:\.[a-z0-9-]+)+',host) or any(len(x)>63 or x.startswith('-') or x.endswith('-') for x in host.split('.')):
-            raise ValueError('Use a valid public domain name')
-        if host.endswith(('.local','.localhost','.internal','.test','.invalid','.example')):
-            raise ValueError('Only real public domains can be monitored')
-        try: ipaddress.ip_address(host)
-        except ValueError: pass
-        else: raise ValueError('Use a public domain, not an IP literal')
-        port = 443 if u.scheme=='https' else 80
-        addresses = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host,port,type=socket.SOCK_STREAM),5)
-        ips = {entry[4][0] for entry in addresses}
-        if not ips or not all(ipaddress.ip_address(ip).is_global for ip in ips):
-            raise ValueError('The domain resolves to a private or reserved address')
-        ip = sorted(ips,key=lambda a:(':' in a,a))[0]
+        host = public_hostname(u.hostname)
+        port = 443 if u.scheme == 'https' else 80
+        ip = await resolve_public(host, port)
         path = u.path or '/'
         if u.query: path += '?' + u.query
         if len(path)>1500 or any(ord(x)>127 for x in path):
@@ -415,16 +418,14 @@ async def check_required_phrase(reader, connection, response, phrase):
     return 'Required phrase not found in the first 256 KiB of response content'
 
 
-async def probe(url, *, required_phrase='', expected_status=None, max_response_ms=None, public_only=False):
-    # DNS-pinned HTTP(S) probe with optional status, latency and content checks.
-    started = time.monotonic()
-    writer = None
+@asynccontextmanager
+async def http_response(url, public_only):
+    host, ip, port, path, scheme = await validate_url(url)
+    target = ip if public_only else probe_connection_target(host, ip)
+    context = ssl.create_default_context() if scheme == 'https' else None
+    reader, writer = await asyncio.wait_for(asyncio.open_connection(
+        target, port, ssl=context, server_hostname=host if context else None), timeout=8)
     try:
-        host, ip, port, path, scheme = await validate_url(url)
-        target = ip if public_only else probe_connection_target(host, ip)
-        context = ssl.create_default_context() if scheme == 'https' else None
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(
-            target, port, ssl=context, server_hostname=host if context else None), timeout=8)
         connection = h11.Connection(h11.CLIENT, max_incomplete_event_size=32 * 1024)
         request = h11.Request(method='GET', target=path, headers=[
             ('Host', host), ('User-Agent', 'BeepNado/0.1'),
@@ -438,41 +439,157 @@ async def probe(url, *, required_phrase='', expected_status=None, max_response_m
                 response = await response_event(reader, connection)
         if not isinstance(response, h11.Response):
             raise ValueError('Invalid or unsupported HTTP response')
+        yield reader, connection, response, writer
+    finally:
+        writer.close()
+        try:
+            await asyncio.wait_for(writer.wait_closed(), 2)
+        except (OSError, TimeoutError, RuntimeError):
+            pass
 
-        code = response.status_code
-        response_ms = int((time.monotonic() - started) * 1000)
-        cert_days = None
-        if context:
+
+def reject_json_constant(value):
+    raise ValueError('Invalid JSON number')
+
+
+def finite_float(value):
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError('JSON number is outside the supported range')
+    return number
+
+
+async def read_json_response(reader, connection, response):
+    if dict(response.headers).get(b'content-encoding', b'identity').lower() != b'identity':
+        raise ValueError('The response used unsupported compression')
+    body = bytearray()
+    async with asyncio.timeout(6):
+        while True:
+            event = await response_event(reader, connection)
+            if isinstance(event, h11.EndOfMessage):
+                return json.loads(body, parse_constant=reject_json_constant, parse_float=finite_float)
+            if not isinstance(event, h11.Data) or len(body) + len(event.data) > CONTENT_LIMIT:
+                raise ValueError('JSON response is incomplete or larger than 256 KiB')
+            body.extend(event.data)
+
+
+async def public_json(url):
+    if urlsplit(url).scheme != 'https':
+        raise ValueError('Public lookup requires HTTPS')
+    async with asyncio.timeout(12):
+        async with http_response(url, public_only=True) as (reader, connection, response, _):
+            if response.status_code != 200:
+                raise ValueError(f'Lookup returned HTTP {response.status_code}')
+            payload = await read_json_response(reader, connection, response)
+    if not isinstance(payload, dict):
+        raise ValueError('Lookup did not return a JSON object')
+    return payload
+
+
+def json_pointer(payload, path):
+    for token in path.split('/')[1:]:
+        key = token.replace('~1', '/').replace('~0', '~')
+        if isinstance(payload, dict):
+            payload = payload[key]
+        elif isinstance(payload, list) and re.fullmatch(r'0|[1-9][0-9]*', key):
+            payload = payload[int(key)]
+        else:
+            raise KeyError(key)
+    return payload
+
+
+async def check_api_json(reader, connection, response, config):
+    try:
+        payload = await read_json_response(reader, connection, response)
+    except (ValueError, TimeoutError, h11.RemoteProtocolError, RecursionError):
+        return 'API did not return a complete JSON response within 256 KiB', None
+    path = config['json_path']
+    try:
+        value = json_pointer(payload, path)
+    except (KeyError, IndexError):
+        return f'JSON pointer {path} was missing', None
+    if config['match'] and (value != config['expected'] or isinstance(value, bool) != isinstance(config['expected'], bool)):
+        return f'JSON value at {path} did not match', None
+    return None, f'JSON pointer {path} passed' if path else 'Valid JSON response'
+
+
+async def probe(url, *, required_phrase='', expected_status=None, max_response_ms=None, public_only=False,
+                api_config=None):
+    started = time.monotonic()
+    try:
+        async with http_response(url, public_only) as (reader, connection, response, writer):
+            code = response.status_code
+            response_ms = int((time.monotonic() - started) * 1000)
+            cert_days = None
             obj = writer.get_extra_info('ssl_object')
             cert = obj.getpeercert() if obj else None
             if cert and cert.get('notAfter'):
                 cert_days = int((ssl.cert_time_to_seconds(cert['notAfter']) - time.time()) // 86400)
-        error = None
-        if expected_status is not None and code != expected_status:
-            error = f'Expected HTTP {expected_status}, received HTTP {code}'
-        elif expected_status is None and code >= 400:
-            error = f'HTTP {code}'
-        elif required_phrase and 300 <= code < 400:
-            error = 'Content check reached a redirect. Monitor the destination URL directly'
-        elif max_response_ms is not None and response_ms > max_response_ms:
-            error = f'Response too slow: {response_ms} ms exceeds {max_response_ms} ms'
-        elif required_phrase:
-            error = await check_required_phrase(reader, connection, response, required_phrase)
-        return dict(state='down' if error else 'up', http_code=code,
-                    response_ms=response_ms, cert_days=cert_days, error=error)
+            error = detail = None
+            if expected_status is not None and code != expected_status:
+                error = f'Expected HTTP {expected_status}, received HTTP {code}'
+            elif expected_status is None and code >= 400:
+                error = f'HTTP {code}'
+            elif required_phrase and 300 <= code < 400:
+                error = 'Content check reached a redirect. Monitor the destination URL directly'
+            elif max_response_ms is not None and response_ms > max_response_ms:
+                error = f'Response too slow: {response_ms} ms exceeds {max_response_ms} ms'
+            elif required_phrase:
+                error = await check_required_phrase(reader, connection, response, required_phrase)
+            elif api_config is not None:
+                error, detail = await check_api_json(reader, connection, response, api_config)
+            result = dict(state='down' if error else 'up', http_code=code,
+                          response_ms=response_ms, cert_days=cert_days, error=error)
+            if detail:
+                result['detail'] = detail
+            return result
     except (h11.RemoteProtocolError, h11.LocalProtocolError):
-        return dict(state='down', http_code=None, response_ms=None,
-                    cert_days=None, error='Invalid HTTP request or response')
-    except Exception as exc:
-        return dict(state='down', http_code=None, response_ms=None,
-                    cert_days=None, error=f'{type(exc).__name__}: {str(exc)[:90]}')
-    finally:
-        if writer:
-            writer.close()
+        return network_result(error='Invalid HTTP request or response')
+    except (ValueError, OSError, TypeError, TimeoutError) as exc:
+        return network_result(error=f'{type(exc).__name__}: {str(exc)[:90]}')
+
+
+async def run_probe(target, kind='http', config=None, *, public_only=False, **http_rules):
+    if kind == 'http':
+        return await probe(target, public_only=public_only, **http_rules)
+    if kind == 'api':
+        return await probe(target, public_only=public_only, expected_status=config['status'], api_config=config)
+    route_tls = (lambda host, ip: ip) if public_only else probe_connection_target
+    return await probe_network(kind, target, config, get_json=public_json, route_tls=route_tls)
+
+
+EGRESS_PROBES = ('https://www.google.com/generate_204', 'https://one.one.one.one/')
+egress_status = None
+egress_lock = asyncio.Lock()
+
+
+async def public_egress_available():
+    global egress_status
+    async with egress_lock:
+        if egress_status and time.monotonic() < egress_status[0]:
+            return egress_status[1]
+
+        async def check(url):
             try:
-                await asyncio.wait_for(writer.wait_closed(), 2)
-            except Exception:
-                pass
+                async with asyncio.timeout(6):
+                    return (await probe(url, public_only=True))['http_code'] is not None
+            except TimeoutError:
+                return False
+
+        healthy = any(await asyncio.gather(*(check(url) for url in EGRESS_PROBES)))
+        egress_status = (time.monotonic() + 20, healthy)
+        return healthy
+
+
+async def account_for_probe_network(observation):
+    # HTTP responses and protocol replies are evidence from the target itself.
+    if (observation['state'] == 'down' and observation['http_code'] is None and not observation.get('detail')
+            and not await public_egress_available()):
+        return network_result(
+            error='The monitoring network could not reach either public reference host',
+            detail='Check inconclusive while public connectivity is unverified', unknown=True,
+        )
+    return observation
 
 
 probe_locks = {}
@@ -489,7 +606,7 @@ def record_check(monitor_id, result):
         if c.execute('''SELECT 1 FROM maintenance_windows
                         WHERE monitor_id=? AND starts_at<=? AND ends_at>?''',
                      (monitor_id, timestamp, timestamp)).fetchone():
-            state = result['state']
+            state = 'degraded' if result['state'] == 'unknown' else result['state']
             store_check(c, monitor_id, 'maintenance', timestamp, state, result)
             c.execute('''UPDATE monitors SET maintenance_last_checked=?,
                          consecutive_failures=CASE WHEN state='degraded' THEN 0 ELSE consecutive_failures END
@@ -500,36 +617,54 @@ def record_check(monitor_id, result):
 
 
 def store_check(c, monitor_id, region, timestamp, state, result):
-    c.execute('''INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error)
-                 VALUES(?,?,?,?,?,?,?,?)''',
+    c.execute('''INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error,detail)
+                 VALUES(?,?,?,?,?,?,?,?,?)''',
               (monitor_id, region, timestamp, state, result['http_code'], result['response_ms'],
-               result['cert_days'], result['error']))
+               result['cert_days'], result['error'], result.get('detail')))
+
+
+def incident_evidence(observation, timestamp, state, region):
+    return json.dumps({
+        'checked_at': timestamp, 'state': state, 'region': region,
+        **{key: observation.get(key) for key in ('http_code', 'response_ms', 'cert_days', 'error', 'detail')},
+    })
 
 
 def record_observation(c, m, result, region, timestamp=None):
     monitor_id = m['id']
     heartbeat = region == 'heartbeat'
+    unknown = result['state'] == 'unknown'
     failures=m['consecutive_failures']+1 if result['state']=='down' else 0
     state='down' if failures>=(1 if heartbeat else 2) else 'degraded' if failures>0 else 'up'
+    if unknown:
+        failures = m['consecutive_failures'] if m['state'] == 'down' else 0
+        # An inconclusive sample cannot open or close a confirmed outage.
+        state = 'down' if m['state'] == 'down' else 'degraded'
     timestamp = timestamp or now()
     c.execute('''UPDATE monitors SET last_checked=?,state=?,consecutive_failures=?,http_code=?,response_ms=?,
-                 cert_days=?,error=?,maintenance_last_checked=NULL WHERE id=?''',
-      (timestamp,state,failures,result['http_code'],result['response_ms'],result['cert_days'],result['error'],monitor_id))
-    store_check(c, monitor_id, region, timestamp, state, result)
+                 cert_days=?,error=?,detail=?,maintenance_last_checked=NULL WHERE id=?''',
+      (timestamp,state,failures,result['http_code'],result['response_ms'],result['cert_days'],result['error'],
+       result.get('detail'),monitor_id))
+    store_check(c, monitor_id, region, timestamp, 'degraded' if unknown else state, result)
+    if unknown:
+        return {'state': 'degraded', 'checked_at': timestamp, 'http_code': result['http_code'],
+                'response_ms': result['response_ms'], 'detail': result.get('detail')}
     incident=c.execute('SELECT id FROM incidents WHERE monitor_id=? AND resolved_at IS NULL ORDER BY id DESC LIMIT 1',(monitor_id,)).fetchone()
     if state=='down' and not incident:
         reason = result['error'] or 'Check failed'
         summary = f'{m["name"]} missed a heartbeat' if heartbeat else f'{m["name"]} failed its monitoring checks'
         opening = f'{m["name"]} missed a heartbeat' if heartbeat else f'Two checks failed for {m["name"]}'
-        c.execute('INSERT INTO incidents(monitor_id,opened_at,summary) VALUES(?,?,?)',(monitor_id,timestamp,summary))
+        c.execute('INSERT INTO incidents(monitor_id,opened_at,summary,opening_evidence) VALUES(?,?,?,?)',
+                  (monitor_id, timestamp, summary, incident_evidence(result, timestamp, state, region)))
         c.execute('INSERT INTO notifications(user_id,monitor_id,kind,message,created_at) VALUES(?,?,?,?,?)',
                   (m['user_id'],monitor_id,'outage',f'{m["name"]}: {reason}',timestamp))
         enqueue_alert(c,m['user_id'],'BeepNado outage: '+m['name'],
                       f'{opening} at {timestamp} UTC.\nLatest result: {reason}\nLog in to {SITE_URL} to investigate.')
     elif state=='up' and incident:
-        recovery = 'heartbeat received' if heartbeat else 'website is responding again'
-        recovery_event = 'sent a heartbeat' if heartbeat else 'responded successfully'
-        c.execute('UPDATE incidents SET resolved_at=? WHERE id=?',(timestamp,incident['id']))
+        recovery = 'heartbeat received' if heartbeat else 'monitor check passed again'
+        recovery_event = 'sent a heartbeat' if heartbeat else 'passed a check'
+        c.execute('UPDATE incidents SET resolved_at=?,recovery_evidence=? WHERE id=?',
+                  (timestamp, incident_evidence(result, timestamp, state, region), incident['id']))
         c.execute('INSERT INTO notifications(user_id,monitor_id,kind,message,created_at) VALUES(?,?,?,?,?)',
                   (m['user_id'],monitor_id,'recovery',f'{m["name"]}: {recovery}',timestamp))
         enqueue_alert(c,m['user_id'],'BeepNado recovery: '+m['name'],
@@ -537,17 +672,25 @@ def record_observation(c, m, result, region, timestamp=None):
     return {'state':state,'checked_at':timestamp,'http_code':result['http_code'],'response_ms':result['response_ms']}
 
 
-async def check_monitor(monitor_id):
+async def check_monitor(monitor_id, *, manual=False):
     lock=probe_locks.setdefault(monitor_id,asyncio.Lock())
     async with lock:
         with db() as c:
-            mon=c.execute('SELECT m.url,m.required_phrase,m.expected_status,m.max_response_ms ' +
-                          ACTIVE_MONITORS + ' AND m.id=? AND m.heartbeat_interval_s IS NULL',(monitor_id,)).fetchone()
-        if not mon:return None
-        return record_check(monitor_id, await probe(
-            mon['url'], required_phrase=mon['required_phrase'],
-            expected_status=mon['expected_status'], max_response_ms=mon['max_response_ms'],
-        ))
+            mon=c.execute('SELECT m.* ' + ACTIVE_MONITORS + ' AND m.id=? AND m.heartbeat_interval_s IS NULL',
+                          (monitor_id,)).fetchone()
+        if not mon:
+            return None
+        if manual:
+            last_check = max(mon['last_checked'] or '', mon['maintenance_last_checked'] or '')
+            cooldown = 300 if mon['probe_kind'] == 'domain' else 15
+            if last_check and (datetime.now(timezone.utc)-datetime.fromisoformat(last_check)).total_seconds() < cooldown:
+                raise HTTPException(429, f'Wait {cooldown} seconds between manual checks')
+        result = await run_probe(
+            mon['url'], mon['probe_kind'], json.loads(mon['probe_config']),
+            required_phrase=mon['required_phrase'], expected_status=mon['expected_status'],
+            max_response_ms=mon['max_response_ms'],
+        )
+        return record_check(monitor_id, await account_for_probe_network(result))
 
 
 async def scheduler():
@@ -556,8 +699,8 @@ async def scheduler():
         try:
             due=[]; clock=datetime.now(timezone.utc)
             with db() as c:
-                for row in c.execute('SELECT m.id,m.last_checked,m.maintenance_last_checked,u.plan ' + ACTIVE_MONITORS + ' AND m.heartbeat_interval_s IS NULL'):
-                    wait = PLAN_INTERVALS.get(row['plan'], 300)
+                for row in c.execute('SELECT m.id,m.last_checked,m.maintenance_last_checked,m.probe_kind,u.plan ' + ACTIVE_MONITORS + ' AND m.heartbeat_interval_s IS NULL'):
+                    wait = EXPIRY_INTERVALS.get(row['probe_kind'], PLAN_INTERVALS.get(row['plan'], 300))
                     last_check = max(row['last_checked'] or '', row['maintenance_last_checked'] or '')
                     if not last_check or (clock-datetime.fromisoformat(last_check)).total_seconds()>=wait:
                         due.append(row['id'])
@@ -856,6 +999,10 @@ def dashboard(user=Depends(require_user)):
         monitors=[dict(r) for r in c.execute('SELECT * FROM monitors WHERE user_id=? ORDER BY id DESC',(user['id'],))]
         checks=[dict(r) for r in c.execute('''SELECT ch.*,m.name monitor_name FROM checks ch JOIN monitors m ON m.id=ch.monitor_id WHERE m.user_id=? ORDER BY ch.id DESC LIMIT 150''',(user['id'],))]
         incidents=[dict(r) for r in c.execute('''SELECT i.*,m.name monitor_name FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE m.user_id=? ORDER BY i.id DESC LIMIT 30''',(user['id'],))]
+        for incident in incidents:
+            for key in ('opening_evidence', 'recovery_evidence'):
+                if incident[key]:
+                    incident[key] = json.loads(incident[key])
         notices=[dict(r) for r in c.execute('''SELECT n.id,n.kind,n.message,n.created_at,m.name monitor_name
                 FROM notifications n JOIN monitors m ON m.id=n.monitor_id
                 WHERE n.user_id=? ORDER BY n.id DESC LIMIT 60''',(user['id'],))]
@@ -872,32 +1019,42 @@ def dashboard(user=Depends(require_user)):
         windows = scheduled_maintenance(c, user['id'], clock)
         regional = {}
         timestamp = datetime.fromisoformat(clock)
+        history_since = {
+            kind: (timestamp - timedelta(seconds=3 * interval)).isoformat(timespec='seconds')
+            for kind, interval in EXPIRY_INTERVALS.items()
+        }
         hour_ago = (timestamp - timedelta(hours=1)).isoformat(timespec='seconds')
-        fresh_since = (timestamp - timedelta(minutes=15)).isoformat(timespec='seconds')
         for row in c.execute('''
-            SELECT ch.monitor_id,ch.region,ch.checked_at,ch.state,ch.http_code,ch.response_ms,ch.error
+            SELECT ch.monitor_id,ch.region,ch.checked_at,ch.state,ch.http_code,ch.response_ms,ch.error,ch.detail,
+                   latest.probe_kind
             FROM checks ch JOIN (
-                SELECT recent.monitor_id,recent.region,MAX(recent.id) AS id
+                SELECT recent.monitor_id,recent.region,MAX(recent.id) AS id,m.probe_kind
                 FROM monitors m JOIN checks recent ON recent.monitor_id=m.id
-                WHERE m.user_id=? AND recent.checked_at>=?
+                WHERE m.user_id=? AND recent.checked_at>=CASE m.probe_kind
+                    WHEN 'ssl' THEN ? WHEN 'domain' THEN ? ELSE ? END
                   AND recent.region NOT IN ('primary','maintenance','heartbeat')
                 GROUP BY recent.monitor_id,recent.region
             ) latest ON latest.id=ch.id
             ORDER BY ch.checked_at DESC, ch.region
-        ''', (user['id'], hour_ago)):
+        ''', (user['id'], history_since['ssl'], history_since['domain'], hour_ago)):
             observation = dict(row)
-            observation['stale'] = row['checked_at'] < fresh_since
+            kind = observation.pop('probe_kind')
+            freshness = max(900, 2 * EXPIRY_INTERVALS.get(kind, 0))
+            observation['stale'] = datetime.fromisoformat(row['checked_at']) < timestamp - timedelta(seconds=freshness)
             regional.setdefault(row['monitor_id'], []).append(observation)
         for mon in monitors:
             mon['maintenance'] = windows.get(mon['id'])
             mon['regional_checks'] = regional.get(mon['id'], [])
             mon['display_state'] = displayed_state(mon, mon['maintenance'], clock)
             mon.pop('heartbeat_token_hash')
-            mon['kind'] = 'heartbeat' if mon['heartbeat_interval_s'] is not None else 'http'
+            kind = mon.pop('probe_kind')
+            mon['kind'] = 'heartbeat' if mon['heartbeat_interval_s'] is not None else kind
+            mon['probe_config'] = json.loads(mon['probe_config'])
             stat=samples.get(mon['id'])
             mon['samples_30d']=int(stat['total']) if stat else 0
             mon['success_rate_30d']=round(100*stat['passed']/stat['total'],2) if stat and stat['total'] else None
-    return {'monitors':monitors,'checks':checks,'incidents':incidents,'notifications':notices,'status_page':dict(page) if page else None,'plan':user['plan'],'limit':PLAN_LIMITS[user['plan']]}
+    return {'monitors':monitors,'checks':checks,'incidents':incidents,'notifications':notices,'status_page':dict(page) if page else None,'plan':user['plan'],'limit':PLAN_LIMITS[user['plan']],
+            'primary_connectivity_unverified': bool(egress_status and time.monotonic() < egress_status[0] and not egress_status[1])}
 
 
 class CheckRules(BaseModel):
@@ -936,6 +1093,66 @@ async def add_monitor(input:MonitorInput,user=Depends(require_csrf)):
             (user['id'], input.name.strip(), input.url.strip(), now(), *input.values()),
         )
         return {'id':cur.lastrowid,'ok':True}
+
+
+async def network_target(input):
+    if input.kind == 'api':
+        target = input.target.strip()
+        await validate_url(target)
+        path = input.json_path.strip()
+        if path and (not path.startswith('/') or re.search(r'~(?![01])', path)):
+            raise ValueError('Enter a JSON pointer such as /status or /items/0/name')
+        expected = None
+        if input.expected.strip():
+            if not path:
+                raise ValueError('Enter a JSON pointer to compare a value')
+            try:
+                expected = json.loads(input.expected, parse_constant=reject_json_constant, parse_float=finite_float)
+            except (ValueError, RecursionError):
+                raise ValueError('Expected value must be JSON, such as "ok", true, or 42') from None
+            if isinstance(expected, (dict, list)):
+                raise ValueError('Compare a single JSON string, number, boolean, or null')
+        return target, {'status': input.status, 'json_path': path, 'expected': expected,
+                        'match': bool(input.expected.strip())}
+
+    target = public_hostname(input.target, dns_record=input.kind == 'dns')
+    if input.kind == 'dns':
+        expected = input.expected.strip()
+        if expected:
+            expected = normalize_dns(input.record_type, expected)
+        return target, {'record_type': input.record_type, 'expected': expected}
+    if input.kind == 'domain':
+        return target, {'days': input.days}
+    if input.kind in ('tcp', 'udp') and input.port is None:
+        raise ValueError('Enter a port between 1 and 65535')
+    if input.kind == 'ssl' and input.port not in (None, 443):
+        raise ValueError('SSL monitors check HTTPS port 443')
+    port = input.port if input.kind in ('tcp', 'udp') else 443
+    await resolve_public(target, port)
+    config = {'port': port}
+    if input.kind == 'ssl':
+        config['days'] = input.days
+    if input.kind == 'udp':
+        config['payload'] = check_hex(input.payload, required=True)
+        config['response_prefix'] = check_hex(input.response_prefix, required=False)
+    return target, config
+
+
+@app.post('/api/monitors/network', status_code=201)
+async def add_network_monitor(input: NetworkInput, user=Depends(require_csrf)):
+    if not input.authorized or len(input.name.strip()) < 2:
+        raise HTTPException(422, 'Enter a monitor name and confirm authorization')
+    try:
+        target, config = await network_target(input)
+    except (ValueError, OSError, TimeoutError) as exc:
+        raise HTTPException(422, str(exc) or 'Public DNS lookup timed out') from exc
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        require_monitor_capacity(c, user['id'])
+        cur = c.execute('''INSERT INTO monitors(user_id,name,url,created_at,probe_kind,probe_config)
+                           VALUES(?,?,?,?,?,?)''',
+                        (user['id'], input.name.strip(), target, now(), input.kind, json.dumps(config)))
+    return {'id': cur.lastrowid, 'ok': True}
 
 
 class HeartbeatInput(BaseModel):
@@ -1007,7 +1224,7 @@ def receive_heartbeat(request: Request):
 @app.patch('/api/monitors/{monitor_id}/rules')
 async def update_monitor_rules(monitor_id: int, input: CheckRules, user=Depends(require_csrf)):
     with db() as c:
-        if not c.execute('SELECT 1 FROM monitors WHERE id=? AND user_id=? AND heartbeat_interval_s IS NULL',
+        if not c.execute("SELECT 1 FROM monitors WHERE id=? AND user_id=? AND heartbeat_interval_s IS NULL AND probe_kind='http'",
                          (monitor_id, user['id'])).fetchone():
             raise HTTPException(404, 'Monitor not found')
     # Let any in-flight check finish before invalidating its latest state.
@@ -1017,7 +1234,7 @@ async def update_monitor_rules(monitor_id: int, input: CheckRules, user=Depends(
             c.execute('BEGIN IMMEDIATE')
             previous = c.execute(
                 '''SELECT required_phrase,expected_status,max_response_ms
-                   FROM monitors WHERE id=? AND user_id=? AND heartbeat_interval_s IS NULL''', (monitor_id, user['id']),
+                   FROM monitors WHERE id=? AND user_id=? AND heartbeat_interval_s IS NULL AND probe_kind='http' ''', (monitor_id, user['id']),
             ).fetchone()
             if previous is None:
                 raise HTTPException(404, 'Monitor not found')
@@ -1046,7 +1263,7 @@ def delete_monitor(monitor_id:int,user=Depends(require_csrf)):
 @app.post('/api/monitors/{monitor_id}/check')
 async def manual_check(monitor_id:int,user=Depends(require_csrf)):
     with db() as c:
-        monitor=c.execute('SELECT m.last_checked,m.maintenance_last_checked,m.heartbeat_interval_s ' + ACTIVE_MONITORS + ' AND m.id=? AND m.user_id=?',
+        monitor=c.execute('SELECT m.heartbeat_interval_s ' + ACTIVE_MONITORS + ' AND m.id=? AND m.user_id=?',
                           (monitor_id,user['id'])).fetchone()
         if not monitor and c.execute('SELECT 1 FROM monitors WHERE id=? AND user_id=?',
                                      (monitor_id,user['id'])).fetchone():
@@ -1054,10 +1271,7 @@ async def manual_check(monitor_id:int,user=Depends(require_csrf)):
     if not monitor:raise HTTPException(404,'Monitor not found')
     if monitor['heartbeat_interval_s'] is not None:
         raise HTTPException(409, 'Heartbeat monitors receive check-ins from your job')
-    last_check = max(monitor['last_checked'] or '', monitor['maintenance_last_checked'] or '')
-    if last_check and (datetime.now(timezone.utc)-datetime.fromisoformat(last_check)).total_seconds()<15:
-        raise HTTPException(429,'Wait 15 seconds between manual checks')
-    result = await check_monitor(monitor_id)
+    result = await check_monitor(monitor_id, manual=True)
     if result is None:raise HTTPException(409,'This monitor is no longer active')
     return {'ok':True,'result':result}
 
@@ -1342,11 +1556,18 @@ def reconcile_subscription(event, sub):
 
 
 @app.get('/internal/targets')
-def remote_targets(request:Request):
+def remote_targets(request:Request, typed: bool = False):
     if not WORKER_TOKEN or len(WORKER_TOKEN)<32 or not hmac.compare_digest(request.headers.get('x-worker-token',''),WORKER_TOKEN):
         raise HTTPException(401,'Worker not authorized')
-    with db() as c:targets=[{'id':row['id'],'url':row['url']} for row in c.execute('SELECT m.id,m.url ' + ACTIVE_MONITORS + ' AND m.heartbeat_interval_s IS NULL')]
-    return {'targets':targets}
+    with db() as c:
+        rows = c.execute('SELECT m.id,m.url,m.probe_kind,m.probe_config ' + ACTIVE_MONITORS +
+                         ' AND m.heartbeat_interval_s IS NULL')
+        if typed:
+            targets = [{'id': row['id'], 'url': row['url'], 'kind': row['probe_kind'],
+                        'config': json.loads(row['probe_config'])} for row in rows]
+        else:
+            targets = [{'id': row['id'], 'url': row['url']} for row in rows if row['probe_kind'] == 'http']
+    return {'targets': targets}
 
 
 class WorkerResult(BaseModel):
@@ -1357,13 +1578,14 @@ class WorkerResult(BaseModel):
     response_ms:int|None=None
     cert_days:int|None=None
     error:str|None=None
+    detail:str|None=Field(default=None,max_length=250)
 
 
 @app.post('/internal/result')
 def remote_result(item:WorkerResult,request:Request):
     if not WORKER_TOKEN or len(WORKER_TOKEN)<32 or not hmac.compare_digest(request.headers.get('x-worker-token',''),WORKER_TOKEN):
         raise HTTPException(401,'Worker not authorized')
-    if item.state not in ('up','down') or item.region in ('primary', 'maintenance', 'heartbeat'):raise HTTPException(422,'Invalid result')
+    if item.state not in ('up','down','unknown') or item.region in ('primary', 'maintenance', 'heartbeat'):raise HTTPException(422,'Invalid result')
     # Keep the external observation separate from primary incident state.
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
@@ -1372,5 +1594,6 @@ def remote_result(item:WorkerResult,request:Request):
             raise HTTPException(404)
         result = item.model_dump()
         result['error'] = (item.error or '')[:100]
-        store_check(c, item.monitor_id, item.region, now(), item.state, result)
+        state = 'degraded' if item.state == 'unknown' else item.state
+        store_check(c, item.monitor_id, item.region, now(), state, result)
     return {'ok':True}

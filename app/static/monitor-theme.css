@@ -217,3 +217,8 @@
 /* Workspace entry */
 .app-loading{display:grid;min-height:100vh;place-content:center;margin:0;background:#101827;color:#e7edf7;font-weight:700}
 .app-loading.hidden{display:none}
+
+/* Network monitor evidence */
+.bn-network-notice{border:1px solid #9d7347;border-radius:12px;background:#3e3020;color:#ffe0ab;padding:12px 15px}
+.bn-monitor-meta small.bn-check-detail{color:#b9cfea}
+.bn-monitor-fields select{width:100%}

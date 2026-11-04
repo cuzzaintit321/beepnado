@@ -14,6 +14,7 @@ PUBLIC_HEAD_TAGS = (
 )
 GUIDE_LINK = r'<a href="/guides/check-website-downtime/">[^<]+</a>'
 AGENCY_LINK = r'<a href="/website-monitoring-for-agencies/">[^<]+</a>'
+FOOTER_CREDIT = r'<span data-reboot-credit>[^<]*<a[^>]+>[^<]+</a>[^<]*</span>'
 ENTRY = r'<p id="app-loading".*?(?=<section id="account-screen")'
 OLD_APP_MARKETING = r'<header class="nav">.*?</main>\s*(?=<section id="account-screen")'
 APP_BACK = r'<button\b[^>]*\bid="account-back"[^>]*>.*?</button>'
@@ -48,6 +49,12 @@ def stage_public(previous, release):
         guide_link = matched(GUIDE_LINK + r'(?=</span></footer>)', previous)
         previous = previous.replace(guide_link + '</span></footer>',
                                     guide_link + ' · ' + matched(AGENCY_LINK, release) + '</span></footer>', 1)
+    if not re.search(FOOTER_CREDIT, previous):
+        footer = matched(r'<footer id="site-footer">.*?</footer>', previous)
+        old_credit = '<span>Your websites. Our radar.</span>'
+        if old_credit in footer:
+            updated_footer = footer.replace(old_credit, matched(FOOTER_CREDIT, release), 1)
+            previous = previous.replace(footer, updated_footer, 1)
     return previous
 
 

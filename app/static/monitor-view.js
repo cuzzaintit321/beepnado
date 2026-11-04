@@ -8,6 +8,10 @@
   const tidy = (v) => esc(String(v ?? ''));
 
   const statusOf = m => m.display_state || m.state || 'pending';
+  const monitorTypes = {
+    http: 'Website', api: 'JSON API', dns: 'DNS record', ssl: 'SSL certificate',
+    domain: 'Domain expiry', ping: 'ICMP ping', tcp: 'TCP port', udp: 'UDP reply', heartbeat: 'Heartbeat'
+  };
 
   function counts() {
     const monitors = getMonitors();
@@ -31,11 +35,11 @@
       const label = observations.length ? 'Public check stale' : 'No recent public check';
       return `<small class="bn-public-check bn-public-stale">${label}</small>`;
     }
-    const failures = fresh.filter(check => check.state === 'down').length;
-    const label = failures === 0 ? 'Public check passed' : failures === fresh.length
-      ? 'Public check failed' : 'Public checks disagree';
+    const states = new Set(fresh.map(check => check.state));
+    const labels = {up: 'Public check passed', down: 'Public check failed', degraded: 'Public check inconclusive'};
+    const label = states.size === 1 ? labels[fresh[0].state] : 'Public checks disagree';
     const title = fresh.map(check => check.region + ' · ' + fmt(check.checked_at)).join(' / ');
-    return `<small class="bn-public-check bn-public-${failures ? 'warning' : 'ok'}" title="${tidy(title)}">${label}</small>`;
+    return `<small class="bn-public-check bn-public-${states.size === 1 && states.has('up') ? 'ok' : 'warning'}" title="${tidy(title)}">${label}</small>`;
   }
 
   function recentBars(m) {
@@ -54,7 +58,9 @@
     const notice = window ? (state === 'maintenance' ? 'Ends ' + fmt(window.ends_at) : 'Planned ' + fmt(window.starts_at)) : '';
     const id = num(m.id);
     const heartbeat = m.kind === 'heartbeat';
-    const target = heartbeat ? 'Heartbeat · every ' + m.heartbeat_interval_s / 60 + ' min' : m.url;
+    const port = ['tcp', 'udp', 'ssl'].includes(m.kind) ? m.probe_config?.port : null;
+    const target = heartbeat ? 'Heartbeat · every ' + m.heartbeat_interval_s / 60 + ' min'
+      : m.kind === 'http' ? m.url : monitorTypes[m.kind] + ' · ' + m.url + (port ? ':' + port : '');
     const timing = heartbeat
       ? (m.heartbeat_last_at == null ? 'Awaiting first ping' : 'Last ping ' + fmt(new Date(m.heartbeat_last_at * 1000).toISOString()))
       : (m.maintenance_last_checked ? 'Maintenance check ' + fmt(m.maintenance_last_checked)
@@ -66,12 +72,15 @@
       <div class="bn-monitor-identity"><span class="bn-state-dot bn-${tidy(state)}" aria-hidden="true"></span>
         <div class="bn-monitor-title"><strong>${tidy(m.name)}</strong><span class="bn-host" title="${tidy(target)}">${tidy(target)}</span>${rules ? '<span class="bn-host">' + tidy(rules) + '</span>' : ''}</div></div>
       <div class="bn-monitor-meta"><span>${pill(state)}</span><small>${tidy(timing)}</small>${notice ? '<small class="bn-maintenance-text">' + tidy(notice) + '</small>' : ''}
+        ${m.detail ? '<small class="bn-check-detail" title="' + tidy(m.detail) + '">' + tidy(m.detail) + '</small>' : ''}
         ${heartbeat ? '' : externalSummary(m)}</div>
       ${recentBars(m)}
       <div class="bn-monitor-metrics">${heartbeat
         ? '<strong>' + num(m.heartbeat_grace_s) / 60 + ' min</strong><small>Grace period</small>'
         : '<strong>' + pct + '</strong><small>30d checks passed</small><span>' + (m.response_ms == null ? '—' : num(m.response_ms) + ' ms') + ' latest</span>'}</div>
-      <div class="bn-monitor-actions">${heartbeat ? '<button class="bn-btn bn-btn-small" data-heartbeat-token="' + id + '">Replace key</button>' : '<button class="bn-btn bn-btn-small" data-check-rules="' + id + '" aria-label="Check rules for ' + tidy(m.name) + '">Rules</button><button class="bn-btn bn-btn-small" data-maintenance="' + id + '">Maintenance</button>'}<button class="bn-btn bn-btn-small bn-investigate-button" data-investigate="${id}" aria-label="Investigate ${tidy(m.name)}">Investigate ↗</button>${heartbeat ? '' : '<button class="bn-btn bn-btn-small" data-check="' + id + '" aria-label="Check ' + tidy(m.name) + ' now">Check now</button>'}<button class="bn-icon-btn" data-remove="${id}" aria-label="Remove ${tidy(m.name)}" title="Remove monitor">×</button></div>
+      <div class="bn-monitor-actions">${heartbeat ? '<button class="bn-btn bn-btn-small" data-heartbeat-token="' + id + '">Replace key</button>' : ''}
+        ${m.kind === 'http' ? '<button class="bn-btn bn-btn-small" data-check-rules="' + id + '" aria-label="Check rules for ' + tidy(m.name) + '">Rules</button>' : ''}
+        ${heartbeat ? '' : '<button class="bn-btn bn-btn-small" data-maintenance="' + id + '">Maintenance</button>'}<button class="bn-btn bn-btn-small bn-investigate-button" data-investigate="${id}" aria-label="Investigate ${tidy(m.name)}">Investigate ↗</button>${heartbeat ? '' : '<button class="bn-btn bn-btn-small" data-check="' + id + '" aria-label="Check ' + tidy(m.name) + ' now">Check now</button>'}<button class="bn-icon-btn" data-remove="${id}" aria-label="Remove ${tidy(m.name)}" title="Remove monitor">×</button></div>
     </article>`;
   }
 
@@ -81,14 +90,32 @@
   investigatorDialog.className='bn-investigator-dialog';
   document.body.appendChild(investigatorDialog);
   let copyableReport='';
-  function investigatorHint(c, heartbeat) {
-    if (heartbeat) {
+  const protocolGuidance = {
+    api: 'Check the endpoint status and the configured JSON pointer and value.',
+    dns: 'Compare the public DNS answer with the record at your authoritative DNS provider.',
+    ssl: 'Check the hostname, certificate chain, and renewal date.',
+    domain: 'Confirm the registration expiry directly with your registrar.',
+    ping: 'Check whether the host and its firewall respond to ICMP echo requests.',
+    tcp: 'Check that the service is listening and the port is reachable from this network.',
+    udp: 'Check that the service replies to the configured request and that the reply prefix is correct.'
+  };
+
+  function investigatorHint(c, kind) {
+    if (kind === 'heartbeat') {
       if (!c) return ['Awaiting first heartbeat','No check-in has been recorded.','Run the check-in command after the job succeeds.'];
       if (c.state==='up') return ['Heartbeat received','The job sent a check-in.','Review the schedule and recent check-ins.'];
       return ['Missed heartbeat',c.error,'Check the job logs, the schedule and whether its check-in command ran.'];
     }
     if (!c) return ['No observations yet','The monitor has not recorded a check.','Run a check to collect evidence.'];
     const err=String(c.error||''), code=Number(c.http_code||0);
+    if (err.includes('public reference host')) {
+      return ['Monitoring connection unverified', c.detail || err, 'Compare with an off-site probe before calling this an outage.'];
+    }
+    if (protocolGuidance[kind]) {
+      const title = c.state === 'up' ? monitorTypes[kind] + ' check passed' : monitorTypes[kind] + ' evidence';
+      return [title, [c.detail, err].filter(Boolean).join('. ') || (code ? 'HTTP ' + code : 'Check completed.'),
+              protocolGuidance[kind]];
+    }
     if (/gaierror|name or service not known|dns|name resolution/i.test(err)) return ['DNS resolution','The hostname did not resolve during this check.','Check authoritative DNS and propagation.'];
     if (/certificate verify failed|certificate has expired|SSLCertVerificationError/i.test(err)) return ['TLS certificate','The HTTPS certificate could not be validated.','Check the certificate, hostname and full chain.'];
     if (/ssl|tls|handshake/i.test(err)) return ['HTTPS handshake','An HTTPS connection could not complete.','Inspect reverse-proxy TLS configuration and logs.'];
@@ -104,40 +131,52 @@
     if (c.state==='up') return ['Currently responding','The latest recorded HTTP response succeeded.','Review history for intermittent failures.'];
     return ['Unclassified failure',err||'A check failed, without enough evidence to identify the cause.','Check server logs and verify from an external network.'];
   }
-  function investigateMonitor(m) {
+  function describeEvidence(check) {
+    if (!check) return 'No saved observation for this event.';
+    return [fmt(check.checked_at), prettyState(check.state), check.http_code == null ? '' : 'HTTP ' + check.http_code,
+      check.response_ms == null ? '' : check.response_ms + ' ms', check.detail, check.error].filter(Boolean).join(' · ');
+  }
+
+  function investigateMonitor(m, incident) {
     const checks=getChecks().filter(c=>Number(c.monitor_id)===Number(m.id)).slice(0,10);
     const heartbeat=m.kind==='heartbeat';
     const region=heartbeat?'heartbeat':'primary';
     const maintenanceCheck = checks.find(c=>c.region==='maintenance' && c.checked_at===m.maintenance_last_checked);
     const latest = maintenanceCheck || (m.last_checked ? (checks.find(c=>c.region===region && c.checked_at===m.last_checked) || m) : null);
-    const hint=investigatorHint(latest, heartbeat);
+    const opening = incident?.opening_evidence || (incident && checks.find(c=>c.region===region && c.checked_at===incident.opened_at && c.state==='down'));
+    const recovery = incident?.recovery_evidence || (incident?.resolved_at && checks.find(c=>c.region===region && c.checked_at===incident.resolved_at && c.state==='up'));
+    const evidence = incident ? opening : latest;
+    const hint=investigatorHint(evidence, m.kind);
     let safeUrl=heartbeat?'Heartbeat':String(m.url||'').split('?')[0];
     try { const u=new URL(m.url); safeUrl=u.origin+u.pathname; } catch(e){}
-    const observed=latest?(latest.checked_at||m.last_checked):null;
-    const lines=checks.map(c=>fmt(c.checked_at)+' | '+c.region+' | '+prettyState(c.state)+(heartbeat?'':' | HTTP '+(c.http_code??'—')+' | '+(c.response_ms??'—')+'ms'));
+    const observed=evidence?(evidence.checked_at||m.last_checked):null;
+    const lines=checks.map(c=>c.region+' · '+describeEvidence(c));
     const external = (m.regional_checks || []).map(c => {
-      const result = c.state === 'up' ? 'Passed' : 'Failed';
-      const evidence = c.error ? String(c.error).replace(/[\r\n]/g, ' ') : 'HTTP ' + (c.http_code ?? '—');
-      return c.region + ' · ' + result + (c.stale ? ' (stale)' : '') + ' · ' + fmt(c.checked_at) + ' · ' + evidence;
+      return c.region + (c.stale ? ' (stale)' : '') + ' · ' + describeEvidence(c);
     });
     copyableReport=[
       'BEEPNADO INCIDENT INVESTIGATOR · Evidence-based report',
       'Monitor: '+m.name+' · '+safeUrl,
-      'Latest state: '+(latest?prettyState(latest.state):'Not checked')+(maintenanceCheck?' (during planned maintenance)':''),
-      'Last observed: '+(observed?fmt(observed):'No check yet'),
+      ...(m.samples_30d ? ['30-day primary checks: '+m.samples_30d+' recorded · '+m.success_rate_30d+'% passed.'] : []),
+      ...(incident ? ['Incident opened: '+fmt(incident.opened_at), 'Opening check: '+describeEvidence(opening),
+        'Recovery check: '+(incident.resolved_at ? describeEvidence(recovery) : 'Incident is open.')] : [
+        'Latest state: '+(latest?prettyState(latest.state):'Not checked')+(maintenanceCheck?' (during planned maintenance)':''),
+        'Last observed: '+(observed?fmt(observed):'No check yet')]),
       'Possible issue: '+hint[0],
       'Observed evidence: '+hint[1],
       'Suggested next step: '+hint[2],
-      'Recorded error: '+String(latest?.error||'None').replace(/[\r\n]/g,' ').slice(0,120),
+      'Recorded error: '+String(evidence?.error||'None').replace(/[\r\n]/g,' ').slice(0,120),
       ...(heartbeat ? [] : ['Public probes:', ...(external.length ? external : ['No recent public observation.'])]),
       'Recent checks:',...(lines.length?lines:['No observations recorded.']),
       'Interpretation is not a confirmed root cause. Same-host checks cannot detect whole-server or Internet outages.'
     ].join('\n');
     const history=checks.length?checks.map(c=>
-      '<div class="bn-investigation-row"><span>'+tidy(fmt(c.checked_at))+'</span><span>'+tidy(prettyState(c.state))+(c.region==='maintenance'?' · planned':isExternal(c)?' · '+tidy(c.region):'')+'</span>'+(heartbeat?'':'<span>HTTP '+tidy(c.http_code??'—')+'</span><span>'+tidy(c.response_ms==null?'—':c.response_ms+' ms')+'</span>')+'</div>').join(''):'<p>No check history yet.</p>';
+      '<div class="bn-investigation-row"><span>'+tidy(fmt(c.checked_at))+'</span><span>'+tidy(prettyState(c.state))+(c.region==='maintenance'?' · planned':isExternal(c)?' · '+tidy(c.region):'')+'</span>'+'<span>'+tidy(c.http_code==null ? c.detail || c.error || '—' : 'HTTP '+c.http_code)+'</span><span>'+tidy(c.response_ms==null?'—':c.response_ms+' ms')+'</span></div>').join(''):'<p>No check history yet.</p>';
     investigatorDialog.innerHTML=
       '<div class="bn-investigator-top"><span>REAL CHECK EVIDENCE · BEEPNADO</span><button type="button" data-investigator-close aria-label="Close">×</button></div>'+
       '<h2>Incident Investigator</h2><p>'+tidy(m.name)+' · '+tidy(safeUrl)+'</p>'+
+      (incident ? '<h3>Incident evidence</h3><p><strong>Opening check</strong> · '+tidy(describeEvidence(opening))+
+        '</p><p><strong>Recovery check</strong> · '+tidy(incident.resolved_at ? describeEvidence(recovery) : 'Incident is open.')+'</p>' : '')+
       '<div class="bn-investigator-cause"><small>POSSIBLE ISSUE — NOT A CONFIRMED ROOT CAUSE</small><h3>'+tidy(hint[0])+'</h3><p>'+tidy(hint[1])+'</p><strong>What to check next</strong><p>'+tidy(hint[2])+'</p></div>'+
       (heartbeat ? '' : '<h3>Public probes</h3>' + (external.length
         ? '<ul class="bn-public-evidence">' + external.map(line => '<li>' + tidy(line) + '</li>').join('') + '</ul>'
@@ -317,12 +356,32 @@
     heartbeatDialog.showModal();
   }
 
+  const networkFields = {
+    api: `<label>Expected HTTP status<input name="status" type="number" min="200" max="299" value="200" required></label>
+      <label>JSON pointer <small>(optional)</small><input name="json_path" maxlength="200" placeholder="/status"></label>
+      <label>Expected JSON value <small>(optional)</small><input name="expected" maxlength="512" placeholder="&quot;ok&quot;"></label>
+      <p class="bn-note">GET request. The response must contain valid JSON. Use a pointer such as /items/0/name to check a value.</p>`,
+    dns: `<label>Record type<select name="record_type">${['A','AAAA','CNAME','MX','NS','TXT','CAA'].map(t=>'<option>'+t+'</option>').join('')}</select></label>
+      <label>Expected record value <small>(optional)</small><input name="expected" maxlength="512"></label>
+      <p class="bn-note">Uses Google Public DNS. Leave the value blank to check for any answer of the selected type.</p>`,
+    ssl: `<label>Minimum days until expiry<input name="days" type="number" min="1" max="365" value="14" required></label>
+      <p class="bn-note">Validates the certificate and hostname on HTTPS port 443.</p>`,
+    domain: `<label>Minimum days until expiry<input name="days" type="number" min="1" max="365" value="14" required></label>
+      <p class="bn-note">Enter the registered domain, such as example.com. The registry needs to publish an expiry date.</p>`,
+    ping: '<p class="bn-note">Sends an ICMP echo request. Some healthy services block ping.</p>',
+    tcp: '<label>TCP port<input name="port" type="number" min="1" max="65535" required></label>',
+    udp: `<label>UDP port<input name="port" type="number" min="1" max="65535" required></label>
+      <label>Request bytes in hex<input name="payload" maxlength="384" placeholder="01020304" required></label>
+      <label>Expected reply prefix in hex <small>(optional)</small><input name="response_prefix" maxlength="384" placeholder="01"></label>
+      <p class="bn-note">Use a request your service will answer. A reply is required for a pass.</p>`
+  };
+
   function addForm() {
     const full = getMonitors().length >= num(dash?.limit);
     const off = full ? 'disabled' : '';
     return `<section class="bn-panel bn-add-panel" id="bn-add-panel"><div class="bn-panel-title"><h3>Add a monitor</h3><span>+ New</span></div>
       <form class="work-form" id="monitor-form">
-        <label>Monitor type<select name="kind" ${off}><option value="http">Website</option><option value="heartbeat">Heartbeat</option></select></label>
+        <label>Monitor type<select name="kind" ${off}>${Object.entries(monitorTypes).map(([kind,label])=>`<option value="${kind}">${label}</option>`).join('')}</select></label>
         <label>Monitor name<input id="bn-monitor-name" name="name" placeholder="My business website" minlength="2" maxlength="100" required ${off}></label>
         <fieldset class="bn-monitor-fields" data-monitor-fields="http" ${off}>
           <label>Website URL<input name="url" type="url" placeholder="https://example.com" required maxlength="1500"></label>
@@ -334,13 +393,23 @@
           <label>Grace period in minutes<input name="grace_minutes" type="number" min="0" max="1440" value="5" required></label>
           <p class="bn-note">If your job misses its interval plus the grace period, BeepNado opens an incident and queues an email alert when email is configured.</p>
         </fieldset>
+        ${Object.entries(networkFields).map(([kind,fields])=>`
+          <fieldset class="bn-monitor-fields" data-monitor-fields="${kind}" hidden disabled>
+            <label>${kind === 'api' ? 'API endpoint URL' : 'Public hostname'}<input name="target"
+              type="${kind === 'api' ? 'url' : 'text'}" maxlength="${kind === 'api' ? 1500 : 253}"
+              placeholder="${kind === 'api' ? 'https://example.com/health' : 'example.com'}" required></label>
+            ${fields}
+            <label class="bn-consent"><input type="checkbox" name="authorized" required> I own or am authorized to monitor this target.</label>
+          </fieldset>`).join('')}
         <button class="bn-btn bn-btn-primary bn-btn-wide" type="submit" ${off}>+ Add monitor</button>
-      </form><p class="bn-note">${full ? 'Plan limit reached. Remove a monitor before adding another.' : 'Website and heartbeat monitors share your plan limit.'}</p></section>`;
+      </form><p class="bn-note">${full ? 'Plan limit reached. Remove a monitor before adding another.' : 'All monitor types share your plan limit.'}</p></section>`;
   }
 
   function summaryStrip() {
     const n = counts();
-    return `<div class="bn-summary-strip" aria-label="Monitor totals">
+    const connectionNotice = dash?.primary_connectivity_unverified
+      ? '<p class="bn-network-notice" role="status">Primary connection unverified. Network failures are marked inconclusive while public connectivity cannot be verified.</p>' : '';
+    return `${connectionNotice}<div class="bn-summary-strip" aria-label="Monitor totals">
       <div><span>Monitors</span><strong>${n.total}<small> / ${num(dash?.limit)}</small></strong></div>
       <div><span>Operational</span><strong class="bn-color-up">${n.up}</strong></div>
       <div><span>Confirmed down</span><strong class="bn-color-down">${n.down}</strong></div>
@@ -349,7 +418,7 @@
   }
 
   function monitorToolbar() {
-    return `<div class="bn-toolbar"><div><h3>Monitors<span class="bn-count">${getMonitors().length}</span></h3><p>Website checks and job heartbeats</p></div>
+    return `<div class="bn-toolbar"><div><h3>Monitors<span class="bn-count">${getMonitors().length}</span></h3><p>Websites, APIs, network services, and job heartbeats</p></div>
       <div class="bn-toolbar-actions"><button class="bn-btn bn-btn-quiet" data-bn-refresh>↻ Refresh</button><button class="bn-btn bn-btn-primary" data-bn-new>+ New monitor</button></div></div>
       <div class="bn-filter-bar"><label class="bn-search-label" for="bn-search">Search monitors<input id="bn-search" type="search" placeholder="Search by name or URL" autocomplete="off" value="${tidy(filterState.query)}"></label>
       <label class="bn-filter-label" for="bn-filter">Status<select id="bn-filter"><option value="all" ${filterState.status==='all'?'selected':''}>All statuses</option><option value="up" ${filterState.status==='up'?'selected':''}>Up</option><option value="down" ${filterState.status==='down'?'selected':''}>Down</option><option value="degraded" ${filterState.status==='degraded'?'selected':''}>Degraded</option><option value="pending" ${filterState.status==='pending'?'selected':''}>Pending</option><option value="maintenance" ${filterState.status==='maintenance'?'selected':''}>Maintenance</option></select></label></div>`;
@@ -392,8 +461,16 @@
           })});
           showHeartbeatCommand(token);
           toast('Heartbeat monitor added');
-        } else {
+        } else if (fd.get('kind') === 'http') {
           await api('/api/monitors', {method:'POST',body:JSON.stringify({name:fd.get('name'),url:fd.get('url'),authorized:fd.get('authorized')==='on',...ruleData(fd)})});
+          toast('Monitor added. First check scheduled.');
+        } else {
+          const data = Object.fromEntries(fd);
+          data.authorized = fd.get('authorized') === 'on';
+          for (const field of ['days', 'port', 'status']) {
+            if (field in data) data[field] = Number(data[field]);
+          }
+          await api('/api/monitors/network', {method:'POST',body:JSON.stringify(data)});
           toast('Monitor added. First check scheduled.');
         }
         dash = await api('/api/dashboard');
@@ -450,7 +527,8 @@
     }
     if (button.hasAttribute('data-investigate')) {
       const monitor=getMonitors().find(m=>Number(m.id)===Number(button.dataset.investigate));
-      if(monitor) investigateMonitor(monitor);
+      const incident = (dash?.incidents || []).find(i=>Number(i.id)===Number(button.dataset.incidentId));
+      if(monitor) investigateMonitor(monitor, incident);
       return;
     }
     if (button.hasAttribute('data-bn-new')) {
