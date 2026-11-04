@@ -146,7 +146,7 @@ async def send_pending(path):
 
 
 async def sync_once(base, token, region, expiry_checks=None):
-    targets = await asyncio.to_thread(dashboard_request, base, token, '/internal/targets?typed=true')
+    targets = await asyncio.to_thread(dashboard_request, base, token, '/internal/targets?typed=true&journeys=true')
     semaphore = asyncio.Semaphore(8)
     active = targets.get('targets', [])
     if expiry_checks is None:

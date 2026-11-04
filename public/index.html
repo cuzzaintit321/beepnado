@@ -15,7 +15,8 @@
 </script>
 <meta name="theme-color" content="#14112b">
 <link rel="stylesheet" href="/static/site.css">
-<link rel="stylesheet" href="/static/experience.css?v=2"></head><body>
+<link rel="stylesheet" href="/static/experience.css?v=2">
+<link rel="stylesheet" href="/static/monitor-types.css"></head><body>
 <div class="shell" id="shell">
 <header class="nav"><a href="/" class="brand" aria-label="BeepNado home"><span class="symbol symbol-storm" aria-hidden="true"><svg viewBox="0 0 42 42" fill="none"><path d="M4 9h32M9 16h24M13 23h17M17 30h9" stroke="currentColor" stroke-width="5" stroke-linecap="round"/><path d="M24 33l-4 5" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/></svg></span><span>beep<span class="brand-accent">nado</span><span class="brand-dot">.</span></span></a><nav class="nav-menu"><a href="#how" data-scroll="how">How it works</a><a href="#pricing" data-scroll="pricing">Pricing</a></nav><div class="nav-actions"><a class="btn btn-light" href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a></div></header>
 <main id="public-home">
@@ -33,6 +34,21 @@
 <div class="trustline"><span>KEEP CALM. BEEP ON.</span><span>HTTP + HTTPS</span><span>SSL VISIBILITY</span><span>INCIDENT HISTORY</span><span>PUBLIC STATUS PAGES</span></div>
 
 <section class="section how" id="how"><div class="how-main"><span class="kicker">HOW IT WORKS</span><h2>Set up in minutes.<br><em>Catch the signal.</em></h2><p>Add your websites and get a clear record of outages and recoveries.</p><a class="btn btn-accent" href="#pricing">See launch plans ↗</a></div><div class="steps"><div><span>01</span><section><h3>Add your website</h3><p>Enter a public URL that you own or have permission to monitor.</p></section></div><div><span>02</span><section><h3>We check its health</h3><p>Scheduled checks record status, response time, and confirmed outages.</p></section></div><div><span>03</span><section><h3>Stay informed</h3><p>Review your history and share a status page with your visitors.</p></section></div></div></section>
+<section id="monitor-types" class="section monitor-types" aria-labelledby="monitor-types-heading">
+  <div class="section-heading">
+    <span class="kicker">WHAT BEEPNADO WATCHES</span>
+    <h2 id="monitor-types-heading">Catch the page that <em>actually broke.</em></h2>
+    <p>Watch individual endpoints or check several important pages together in one monitor.</p>
+  </div>
+  <ul class="monitor-type-grid">
+    <li><h3>Page journeys</h3><p>Check up to five pages in order and see which step failed, with status, timing, and error evidence.</p></li>
+    <li><h3>Website and keyword checks</h3><p>Watch HTTP and HTTPS pages for unexpected status, missing text, or slow responses.</p></li>
+    <li><h3>JSON API checks</h3><p>Validate that an endpoint returns JSON and an expected value.</p></li>
+    <li><h3>Ping, TCP, and UDP</h3><p>Check reachability, confirm that a port accepts connections, or verify a UDP reply.</p></li>
+    <li><h3>DNS, certificates, and domains</h3><p>Check DNS answers and catch certificate or domain expiry before renewal is due.</p></li>
+    <li><h3>Scheduled job heartbeats</h3><p>Find out when a cron job or backup misses its expected check-in.</p></li>
+  </ul>
+</section>
 <section class="section pricing" id="pricing"><div class="section-heading"><span class="kicker">SIMPLE PRICING</span><h2>Plans for <em>website monitoring.</em></h2><p>Open BeepNado to check signup and billing availability.</p></div><div class="pricing-grid"><div class="price-card"><div class="plan-tag">STARTER</div><h3>Free</h3><p>For personal sites and early testing.</p><div class="price">$0<span>/mo</span></div><hr><div class="plan-lines">✓ 2 website monitors<br>✓ 5-minute primary checks<br>✓ Incident history<br>✓ Public status page</div><a class="btn btn-outline-dark" href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a></div><div class="price-card featured"><div class="plan-tag">BUILDERS</div><h3>Pro</h3><p>For businesses that need more visibility.</p><div class="price">$12<span>/mo</span></div><hr><div class="plan-lines">✓ 20 website monitors<br>✓ 1-minute primary checks<br>✓ Incident history<br>✓ Public status page</div><a class="btn btn-outline-dark" href="https://app.beepnado.com/#pricing">Explore Pro ↗</a></div><div class="price-card"><div class="plan-tag">GROWING TEAMS</div><h3>Team</h3><p>For monitoring larger collections of sites.</p><div class="price">$39<span>/mo</span></div><hr><div class="plan-lines">✓ 100 website monitors<br>✓ 1-minute primary checks<br>✓ Incident history<br>✓ Public status page</div><a class="btn btn-outline-dark" href="https://app.beepnado.com/#pricing">Explore Team ↗</a></div></div><p class="pricing-disclaimer">Multi-region observations require independent worker deployment. No uptime SLA or automatic incident repair is promised.</p></section>
 <section class="closing"><span class="kicker">READY TO SEE WHAT'S UP?</span><h2>No panic. <em>Just BeepNado.</em></h2></section>
 </main>

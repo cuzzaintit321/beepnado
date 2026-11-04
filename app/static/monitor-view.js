@@ -9,7 +9,7 @@
 
   const statusOf = m => m.display_state || m.state || 'pending';
   const monitorTypes = {
-    http: 'Website', api: 'JSON API', dns: 'DNS record', ssl: 'SSL certificate',
+    http: 'Website', journey: 'Page journey', api: 'JSON API', dns: 'DNS record', ssl: 'SSL certificate',
     domain: 'Domain expiry', ping: 'ICMP ping', tcp: 'TCP port', udp: 'UDP reply', heartbeat: 'Heartbeat'
   };
 
@@ -66,7 +66,7 @@
       : (m.maintenance_last_checked ? 'Maintenance check ' + fmt(m.maintenance_last_checked)
          : m.last_checked ? 'Primary check ' + fmt(m.last_checked) : 'Awaiting first check');
     const pct = m.samples_30d ? `${num(m.success_rate_30d).toFixed(2)}%` : '—';
-    const rules = [m.required_phrase && 'Required phrase', m.expected_status && 'HTTP ' + m.expected_status,
+    const rules = m.kind === 'journey' ? m.probe_config.steps.length + ' steps' : [m.required_phrase && 'Required phrase', m.expected_status && 'HTTP ' + m.expected_status,
       m.max_response_ms && '≤ ' + m.max_response_ms + ' ms'].filter(Boolean).join(' · ');
     return `<article class="bn-monitor-row" aria-label="${tidy(m.name)}: ${tidy(prettyState(state))}">
       <div class="bn-monitor-identity"><span class="bn-state-dot bn-${tidy(state)}" aria-hidden="true"></span>
@@ -79,7 +79,7 @@
         ? '<strong>' + num(m.heartbeat_grace_s) / 60 + ' min</strong><small>Grace period</small>'
         : '<strong>' + pct + '</strong><small>30d checks passed</small><span>' + (m.response_ms == null ? '—' : num(m.response_ms) + ' ms') + ' latest</span>'}</div>
       <div class="bn-monitor-actions">${heartbeat ? '<button class="bn-btn bn-btn-small" data-heartbeat-token="' + id + '">Replace key</button>' : ''}
-        ${m.kind === 'http' ? '<button class="bn-btn bn-btn-small" data-check-rules="' + id + '" aria-label="Check rules for ' + tidy(m.name) + '">Rules</button>' : ''}
+        ${['http', 'journey'].includes(m.kind) ? '<button class="bn-btn bn-btn-small" data-check-rules="' + id + '" aria-label="Edit checks for ' + tidy(m.name) + '">' + (m.kind === 'journey' ? 'Edit journey' : 'Rules') + '</button>' : ''}
         ${heartbeat ? '' : '<button class="bn-btn bn-btn-small" data-maintenance="' + id + '">Maintenance</button>'}<button class="bn-btn bn-btn-small bn-investigate-button" data-investigate="${id}" aria-label="Investigate ${tidy(m.name)}">Investigate ↗</button>${heartbeat ? '' : '<button class="bn-btn bn-btn-small" data-check="' + id + '" aria-label="Check ' + tidy(m.name) + ' now">Check now</button>'}<button class="bn-icon-btn" data-remove="${id}" aria-label="Remove ${tidy(m.name)}" title="Remove monitor">×</button></div>
     </article>`;
   }
@@ -91,6 +91,7 @@
   document.body.appendChild(investigatorDialog);
   let copyableReport='';
   const protocolGuidance = {
+    journey: 'Open the failing path directly and compare its status and response text with the step settings.',
     api: 'Check the endpoint status and the configured JSON pointer and value.',
     dns: 'Compare the public DNS answer with the record at your authoritative DNS provider.',
     ssl: 'Check the hostname, certificate chain, and renewal date.',
@@ -137,6 +138,15 @@
       check.response_ms == null ? '' : check.response_ms + ' ms', check.detail, check.error].filter(Boolean).join(' · ');
   }
 
+  function journeyEvidence(check) {
+    return (check?.journey_trace?.steps || []).map(step => [
+      step.name + ' (' + step.path + ')',
+      {up: 'Passed', down: 'Failed', unknown: 'Inconclusive'}[step.state],
+      step.http_code == null ? '' : 'HTTP ' + step.http_code,
+      step.response_ms + ' ms', step.error
+    ].filter(Boolean).join(' · '));
+  }
+
   function investigateMonitor(m, incident, observations) {
     const checks=observations.filter(c=>Number(c.monitor_id)===Number(m.id)).slice(0,10);
     const heartbeat=m.kind==='heartbeat';
@@ -151,9 +161,13 @@
     try { const u=new URL(m.url); safeUrl=u.origin+u.pathname; } catch(e){}
     const observed=evidence?(evidence.checked_at||m.last_checked):null;
     const lines=checks.map(c=>c.region+' · '+describeEvidence(c));
-    const external = (m.regional_checks || []).map(c => {
-      return c.region + (c.stale ? ' (stale)' : '') + ' · ' + describeEvidence(c);
-    });
+    const regional = m.regional_checks || [];
+    const external = regional.map(c => c.region + (c.stale ? ' (stale)' : '') + ' · ' + describeEvidence(c));
+    const journeyRuns = m.kind === 'journey'
+      ? [...(incident ? [['Opening journey', opening], ['Recovery journey', recovery]] : [['Latest journey', latest]]),
+          ...regional.map(c => ['Public journey · ' + c.region + (c.stale ? ' (stale)' : ''), c])]
+          .map(([label, check]) => ({label, lines: journeyEvidence(check)})).filter(run => run.lines.length)
+      : [];
     copyableReport=[
       'BEEPNADO INCIDENT INVESTIGATOR · Evidence-based report',
       'Monitor: '+m.name+' · '+safeUrl,
@@ -167,6 +181,7 @@
       'Suggested next step: '+hint[2],
       'Recorded error: '+String(evidence?.error||'None').replace(/[\r\n]/g,' ').slice(0,120),
       ...(heartbeat ? [] : ['Public probes:', ...(external.length ? external : ['No recent public observation.'])]),
+      ...journeyRuns.flatMap(run => [run.label, ...run.lines]),
       'Recent checks:',...(lines.length?lines:['No observations recorded.']),
       'Interpretation is not a confirmed root cause. Same-host checks cannot detect whole-server or Internet outages.'
     ].join('\n');
@@ -181,6 +196,8 @@
       (heartbeat ? '' : '<h3>Public probes</h3>' + (external.length
         ? '<ul class="bn-public-evidence">' + external.map(line => '<li>' + tidy(line) + '</li>').join('') + '</ul>'
         : '<p>No recent public observation.</p>')) +
+      journeyRuns.map(run => '<h3>' + tidy(run.label) + '</h3><ol class="bn-public-evidence">' +
+        run.lines.map(line => '<li>' + tidy(line) + '</li>').join('') + '</ol>').join('')+
       '<h3>Recent recorded checks</h3><div class="bn-investigator-history">'+history+'</div>'+
       '<p class="bn-investigator-note">Based only on recorded observations; no simulated data. If monitoring from the same server, a total server or network outage will not be detected independently.</p>'+
       '<div class="bn-investigator-actions"><button type="button" class="bn-btn bn-btn-primary" data-investigator-copy>Copy client report</button><button type="button" class="bn-btn bn-btn-quiet" data-investigator-close>Close</button></div>';
@@ -237,35 +254,97 @@
     };
   }
 
+  const minJourneySteps = 2;
+  const maxJourneySteps = 5;
+
+  function journeyStep(step = {}) {
+    return `<fieldset class="bn-journey-step" data-journey-step>
+      <legend>Step</legend>
+      <label>Step name<input name="step_name" required maxlength="40" value="${tidy(step.name)}" placeholder="Pricing"></label>
+      <label>Page path<input name="step_path" required maxlength="200" value="${tidy(step.path)}" placeholder="/pricing"></label>
+      <label>Expected HTTP status<input name="step_status" type="number" min="200" max="299" required value="${tidy(step.expected_status ?? 200)}"></label>
+      <label>Required text <small>(optional)</small><input name="step_phrase" maxlength="120" value="${tidy(step.required_phrase)}" placeholder="Compare plans"></label>
+      <button type="button" class="bn-btn bn-btn-small" data-remove-step>Remove step</button>
+    </fieldset>`;
+  }
+
+  function journeyFields(steps = [{name: 'Home', path: '/'}, {}]) {
+    return `<p class="bn-note">Check 2–5 pages in order. Each step sends a GET request to a path on this site. The run stops at the first failure.</p>
+      <div data-journey-steps>${steps.map(journeyStep).join('')}</div>
+      <button type="button" class="bn-btn bn-btn-small" data-add-step>+ Add step</button>`;
+  }
+
+  function wireJourneyFields(container) {
+    const list = container.querySelector('[data-journey-steps]');
+    const add = container.querySelector('[data-add-step]');
+    function updateControls() {
+      const rows = list.querySelectorAll('[data-journey-step]');
+      add.disabled = rows.length >= maxJourneySteps;
+      rows.forEach((row, i) => {
+        row.querySelector('legend').textContent = 'Step ' + (i + 1);
+        const remove = row.querySelector('[data-remove-step]');
+        remove.disabled = rows.length <= minJourneySteps;
+        remove.setAttribute('aria-label', 'Remove step ' + (i + 1));
+      });
+    }
+    add.addEventListener('click', () => {
+      list.insertAdjacentHTML('beforeend', journeyStep());
+      updateControls();
+      list.lastElementChild.querySelector('input').focus();
+    });
+    list.addEventListener('click', event => {
+      const remove = event.target.closest('[data-remove-step]');
+      if (!remove || remove.disabled) return;
+      const row = remove.closest('[data-journey-step]');
+      const neighbor = row.nextElementSibling || row.previousElementSibling;
+      row.remove();
+      updateControls();
+      neighbor.querySelector('input').focus();
+    });
+    updateControls();
+  }
+
+  function readJourneySteps(container) {
+    return Array.from(container.querySelectorAll('[data-journey-step]'), row => ({
+      name: row.querySelector('[name=step_name]').value,
+      path: row.querySelector('[name=step_path]').value,
+      expected_status: Number(row.querySelector('[name=step_status]').value),
+      required_phrase: row.querySelector('[name=step_phrase]').value,
+    }));
+  }
+
   const rulesDialog=document.createElement('dialog');
   rulesDialog.className='bn-investigator-dialog bn-rules-dialog';
   rulesDialog.setAttribute('aria-labelledby','bn-rules-title');
   document.body.appendChild(rulesDialog);
 
   function editRules(m) {
+    const journey = m.kind === 'journey';
     rulesDialog.innerHTML=`<div class="bn-investigator-top"><span>MONITOR SETTINGS</span><button type="button" data-close-rules aria-label="Close">×</button></div>
-      <h2 id="bn-rules-title">Check rules</h2><p>${tidy(m.name)}</p>
-      <form class="work-form">${ruleFields(m)}
-        <p class="bn-note">Phrase checks look for case-insensitive text in the first 256 KiB of the HTTP response. Response time is measured through the response headers.</p>
+      <h2 id="bn-rules-title">${journey ? 'Edit page journey' : 'Check rules'}</h2><p>${tidy(m.name)}${journey ? ' · ' + tidy(m.url) : ''}</p>
+      <form class="work-form">${journey ? journeyFields(m.probe_config.steps) : ruleFields(m)}
+        <p class="bn-note">Phrase checks look for case-insensitive text in the first 256 KiB of the HTTP response.${journey ? '' : ' Response time is measured through the response headers.'}</p>
         <p class="bn-note" role="status"></p>
         <div class="bn-investigator-actions"><button type="submit" class="bn-btn bn-btn-primary">Save rules</button><button type="button" class="bn-btn bn-btn-quiet" data-close-rules>Cancel</button></div>
       </form>`;
     rulesDialog.querySelectorAll('[data-close-rules]').forEach(button=>button.addEventListener('click',()=>rulesDialog.close()));
     const form=rulesDialog.querySelector('form');
+    if (journey) wireJourneyFields(form);
     form.addEventListener('submit',async e=>{
       e.preventDefault();
       const button=form.querySelector('[type="submit"]');
       button.disabled=true;
       form.querySelector('[role="status"]').textContent='';
       try {
-        await api('/api/monitors/'+num(m.id)+'/rules',{method:'PATCH',body:JSON.stringify(ruleData(new FormData(form)))});
+        const settings = journey ? {steps: readJourneySteps(form)} : ruleData(new FormData(form));
+        await api('/api/monitors/'+num(m.id)+(journey ? '/journey' : '/rules'),{method:'PATCH',body:JSON.stringify(settings)});
       } catch (error) {
         form.querySelector('[role="status"]').textContent=error.message;
         button.disabled=false;
         return;
       }
       rulesDialog.close();
-      toast('Check rules saved');
+      toast(journey ? 'Page journey saved' : 'Check rules saved');
       try { dash=await api('/api/dashboard'); renderView(); }
       catch (error) { toast(error.message); }
     });
@@ -388,6 +467,11 @@
           <details><summary>Optional check rules</summary>${ruleFields()}</details>
           <label class="bn-consent"><input type="checkbox" name="authorized" required> I own or am authorized to monitor this site.</label>
         </fieldset>
+        <fieldset class="bn-monitor-fields" data-monitor-fields="journey" hidden disabled>
+          <label>Site origin<input name="origin" type="url" placeholder="https://example.com" required maxlength="300"></label>
+          ${journeyFields()}
+          <label class="bn-consent"><input type="checkbox" name="authorized" required> I own or am authorized to monitor these pages.</label>
+        </fieldset>
         <fieldset class="bn-monitor-fields" data-monitor-fields="heartbeat" hidden disabled>
           <label>Expected interval in minutes<input name="interval_minutes" type="number" min="1" max="43200" value="60" required></label>
           <label>Grace period in minutes<input name="grace_minutes" type="number" min="0" max="1440" value="5" required></label>
@@ -442,12 +526,15 @@
         <p class="bn-disclosure">Monitoring results reflect checks from this server's configured region. Same-host checks do not detect home Internet or server-wide outages.</p></div>
         <aside class="bn-aside">${sideSnapshot()}${addForm()}</aside></div>`;
     const form = document.getElementById('monitor-form');
-    form?.querySelector('[name=kind]').addEventListener('change', e => {
+    const journey = form.querySelector('[data-monitor-fields="journey"]');
+    wireJourneyFields(journey);
+    form.querySelector('[name=kind]').addEventListener('change', e => {
       const kind=e.target.value;
       for (const fields of form.querySelectorAll('[data-monitor-fields]')) {
         fields.hidden = fields.disabled = fields.dataset.monitorFields !== kind;
       }
-      form.querySelector('[name=name]').placeholder = kind === 'heartbeat' ? 'Nightly database backup' : 'My business website';
+      const placeholders = {heartbeat: 'Nightly database backup', journey: 'Visitor journey'};
+      form.querySelector('[name=name]').placeholder = placeholders[kind] || 'My business website';
     });
     form?.addEventListener('submit', async e => {
       e.preventDefault();
@@ -464,6 +551,12 @@
         } else if (fd.get('kind') === 'http') {
           await api('/api/monitors', {method:'POST',body:JSON.stringify({name:fd.get('name'),url:fd.get('url'),authorized:fd.get('authorized')==='on',...ruleData(fd)})});
           toast('Monitor added. First check scheduled.');
+        } else if (fd.get('kind') === 'journey') {
+          await api('/api/monitors/journey', {method:'POST',body:JSON.stringify({
+            name:fd.get('name'), origin:fd.get('origin'), authorized:fd.get('authorized')==='on',
+            steps:readJourneySteps(journey)
+          })});
+          toast('Page journey added. First check scheduled.');
         } else {
           const data = Object.fromEntries(fd);
           data.authorized = fd.get('authorized') === 'on';

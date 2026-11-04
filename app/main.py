@@ -37,6 +37,8 @@ from .network_checks import (
     public_hostname, resolve_public, result as network_result,
 )
 
+from .journeys import JourneyInput, JourneySettings, JourneyTrace, journey_origin, probe_journey
+
 ROOT = Path(__file__).resolve().parent
 DB_PATH = os.getenv('DATABASE_PATH', '/data/beepnado.sqlite3')
 SESSION_SECURE = os.getenv('SESSION_SECURE', 'true').lower() == 'true'
@@ -224,8 +226,10 @@ def init_db():
         ):
             if name not in monitor_columns:
                 c.execute(f'ALTER TABLE monitors ADD COLUMN {name} {column_type}')
-        if 'detail' not in {r['name'] for r in c.execute('PRAGMA table_info(checks)')}:
-            c.execute('ALTER TABLE checks ADD COLUMN detail TEXT')
+        check_columns = {r['name'] for r in c.execute('PRAGMA table_info(checks)')}
+        for column in ('detail', 'journey_trace'):
+            if column not in check_columns:
+                c.execute(f'ALTER TABLE checks ADD COLUMN {column} TEXT')
         incident_columns = {r['name'] for r in c.execute('PRAGMA table_info(incidents)')}
         for column in ('opening_evidence', 'recovery_evidence'):
             if column not in incident_columns:
@@ -568,6 +572,8 @@ async def probe(url, *, required_phrase='', expected_status=None, max_response_m
 async def run_probe(target, kind='http', config=None, *, public_only=False, **http_rules):
     if kind == 'http':
         return await probe(target, public_only=public_only, **http_rules)
+    if kind == 'journey':
+        return await probe_journey(target, config, probe, account_for_probe_network, public_only=public_only)
     if kind == 'api':
         return await probe(target, public_only=public_only, expected_status=config['status'], api_config=config)
     route_tls = (lambda host, ip: ip) if public_only else probe_connection_target
@@ -633,17 +639,21 @@ def record_check(monitor_id, result):
 
 
 def store_check(c, monitor_id, region, timestamp, state, result):
-    c.execute('''INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error,detail)
-                 VALUES(?,?,?,?,?,?,?,?,?)''',
+    trace = result.get('journey_trace')
+    c.execute('''INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error,detail,journey_trace)
+                 VALUES(?,?,?,?,?,?,?,?,?,?)''',
               (monitor_id, region, timestamp, state, result['http_code'], result['response_ms'],
-               result['cert_days'], result['error'], result.get('detail')))
+               result['cert_days'], result['error'], result.get('detail'), json.dumps(trace) if trace else None))
 
 
 def incident_evidence(observation, timestamp, state, region):
-    return json.dumps({
+    evidence = {
         'checked_at': timestamp, 'state': state, 'region': region,
         **{key: observation.get(key) for key in ('http_code', 'response_ms', 'cert_days', 'error', 'detail')},
-    })
+    }
+    if observation.get('journey_trace'):
+        evidence['journey_trace'] = observation['journey_trace']
+    return json.dumps(evidence)
 
 
 def record_observation(c, m, result, region, timestamp=None):
@@ -1028,6 +1038,9 @@ def dashboard(user=Depends(require_user)):
     with db() as c:
         monitors=[dict(r) for r in c.execute('SELECT * FROM monitors WHERE user_id=? ORDER BY id DESC',(user['id'],))]
         checks=[dict(r) for r in c.execute('''SELECT ch.*,m.name monitor_name FROM checks ch JOIN monitors m ON m.id=ch.monitor_id WHERE m.user_id=? ORDER BY ch.id DESC LIMIT 150''',(user['id'],))]
+        for check in checks:
+            if check['journey_trace']:
+                check['journey_trace'] = json.loads(check['journey_trace'])
         incidents=[dict(r) for r in c.execute('''SELECT i.*,m.name monitor_name FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE m.user_id=? ORDER BY i.id DESC LIMIT 30''',(user['id'],))]
         for incident in incidents:
             for key in ('opening_evidence', 'recovery_evidence'):
@@ -1056,7 +1069,7 @@ def dashboard(user=Depends(require_user)):
         hour_ago = (timestamp - timedelta(hours=1)).isoformat(timespec='seconds')
         for row in c.execute('''
             SELECT ch.monitor_id,ch.region,ch.checked_at,ch.state,ch.http_code,ch.response_ms,ch.error,ch.detail,
-                   latest.probe_kind
+                   ch.journey_trace,latest.probe_kind
             FROM checks ch JOIN (
                 SELECT recent.monitor_id,recent.region,MAX(recent.id) AS id,m.probe_kind
                 FROM monitors m JOIN checks recent ON recent.monitor_id=m.id
@@ -1069,6 +1082,8 @@ def dashboard(user=Depends(require_user)):
         ''', (user['id'], history_since['ssl'], history_since['domain'], hour_ago)):
             observation = dict(row)
             kind = observation.pop('probe_kind')
+            if observation['journey_trace']:
+                observation['journey_trace'] = json.loads(observation['journey_trace'])
             freshness = max(900, 2 * EXPIRY_INTERVALS.get(kind, 0))
             observation['stale'] = datetime.fromisoformat(row['checked_at']) < timestamp - timedelta(seconds=freshness)
             regional.setdefault(row['monitor_id'], []).append(observation)
@@ -1080,6 +1095,10 @@ def dashboard(user=Depends(require_user)):
             kind = mon.pop('probe_kind')
             mon['kind'] = 'heartbeat' if mon['heartbeat_interval_s'] is not None else kind
             mon['probe_config'] = json.loads(mon['probe_config'])
+            if kind == 'journey':
+                revision = mon['probe_config']['revision']
+                mon['regional_checks'] = [check for check in mon['regional_checks']
+                                          if (check['journey_trace'] or {}).get('revision') == revision]
             stat=samples.get(mon['id'])
             mon['samples_30d']=int(stat['total']) if stat else 0
             mon['success_rate_30d']=round(100*stat['passed']/stat['total'],2) if stat and stat['total'] else None
@@ -1183,6 +1202,46 @@ async def add_network_monitor(input: NetworkInput, user=Depends(require_csrf)):
                            VALUES(?,?,?,?,?,?)''',
                         (user['id'], input.name.strip(), target, now(), input.kind, json.dumps(config)))
     return {'id': cur.lastrowid, 'ok': True}
+
+
+@app.post('/api/monitors/journey', status_code=201)
+async def add_journey(input: JourneyInput, user=Depends(require_csrf)):
+    if not input.authorized or len(input.name.strip()) < 2:
+        raise HTTPException(422, 'Enter a monitor name and confirm authorization')
+    try:
+        origin = await journey_origin(input.origin, validate_url)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc) or 'Public DNS lookup timed out') from exc
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        require_monitor_capacity(c, user['id'])
+        cur = c.execute('''INSERT INTO monitors(user_id,name,url,created_at,probe_kind,probe_config)
+            VALUES(?,?,?,?,'journey',?)''',
+            (user['id'], input.name.strip(), origin, now(), json.dumps(input.new_config())))
+    return {'id': cur.lastrowid, 'ok': True}
+
+
+@app.patch('/api/monitors/{monitor_id}/journey')
+async def update_journey(monitor_id: int, input: JourneySettings, user=Depends(require_csrf)):
+    with db() as c:
+        if not c.execute("SELECT 1 FROM monitors WHERE id=? AND user_id=? AND probe_kind='journey'",
+                         (monitor_id, user['id'])).fetchone():
+            raise HTTPException(404, 'Monitor not found')
+    lock = probe_locks.setdefault(monitor_id, asyncio.Lock())
+    async with lock:
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            row = c.execute("SELECT probe_config FROM monitors WHERE id=? AND user_id=? AND probe_kind='journey'",
+                            (monitor_id, user['id'])).fetchone()
+            if not row:
+                raise HTTPException(404, 'Monitor not found')
+            config = input.new_config()
+            if json.loads(row['probe_config'])['steps'] != config['steps']:
+                c.execute('''UPDATE monitors SET probe_config=?,last_checked=NULL,maintenance_last_checked=NULL,
+                    state='pending',consecutive_failures=0,http_code=NULL,response_ms=NULL,
+                    cert_days=NULL,error=NULL,detail=NULL WHERE id=? AND user_id=?''',
+                    (json.dumps(config), monitor_id, user['id']))
+    return {'ok': True}
 
 
 class HeartbeatInput(BaseModel):
@@ -1711,7 +1770,7 @@ def reconcile_subscription(event, sub):
 
 
 @app.get('/internal/targets')
-def remote_targets(request:Request, typed: bool = False):
+def remote_targets(request:Request, typed: bool = False, journeys: bool = False):
     if not WORKER_TOKEN or len(WORKER_TOKEN)<32 or not hmac.compare_digest(request.headers.get('x-worker-token',''),WORKER_TOKEN):
         raise HTTPException(401,'Worker not authorized')
     with db() as c:
@@ -1719,7 +1778,8 @@ def remote_targets(request:Request, typed: bool = False):
                          ' AND m.heartbeat_interval_s IS NULL')
         if typed:
             targets = [{'id': row['id'], 'url': row['url'], 'kind': row['probe_kind'],
-                        'config': json.loads(row['probe_config'])} for row in rows]
+                        'config': json.loads(row['probe_config'])} for row in rows
+                       if journeys or row['probe_kind'] != 'journey']
         else:
             targets = [{'id': row['id'], 'url': row['url']} for row in rows if row['probe_kind'] == 'http']
     return {'targets': targets}
@@ -1734,6 +1794,7 @@ class WorkerResult(BaseModel):
     cert_days:int|None=None
     error:str|None=None
     detail:str|None=Field(default=None,max_length=250)
+    journey_trace:JourneyTrace|None=None
 
 
 @app.post('/internal/result')
@@ -1744,9 +1805,16 @@ def remote_result(item:WorkerResult,request:Request):
     # Keep the external observation separate from primary incident state.
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
-        if not c.execute('SELECT 1 ' + ACTIVE_MONITORS + ' AND m.id=? AND m.heartbeat_interval_s IS NULL',
-                         (item.monitor_id,)).fetchone():
+        monitor = c.execute('SELECT m.probe_kind,m.probe_config ' + ACTIVE_MONITORS +
+                            ' AND m.id=? AND m.heartbeat_interval_s IS NULL', (item.monitor_id,)).fetchone()
+        if not monitor:
             raise HTTPException(404)
+        if monitor['probe_kind'] == 'journey':
+            revision = json.loads(monitor['probe_config'])['revision']
+            if not item.journey_trace or item.journey_trace.revision != revision:
+                raise HTTPException(409, 'Journey settings changed. Fetch the current targets.')
+        elif item.journey_trace:
+            raise HTTPException(422, 'Journey evidence requires a journey monitor')
         result = item.model_dump()
         result['error'] = (item.error or '')[:100]
         state = 'degraded' if item.state == 'unknown' else item.state

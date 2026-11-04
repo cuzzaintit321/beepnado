@@ -65,6 +65,12 @@ The Compose files permit ICMP datagram sockets for the BeepNado group without gr
 
 For an ambiguous network failure, the primary or remote probe checks public HTTPS connectivity to two independent reference hosts. If neither answers, the failed probe is inconclusive and cannot open or close an incident. An off-site worker and its independent alerting can detect when a site on the primary server's internet connection becomes unreachable.
 
+## Page journeys
+
+In **Monitors**, choose **Page journey**. Enter the public site origin and add two to five paths, each with an expected HTTP status and optional required text. A journey counts as one monitor. It makes GET requests in order and stops at the first failed or inconclusive step. Use **Edit journey** to change the steps and keep historical evidence.
+
+**Investigate** shows the attempted steps, their status codes and timings, and the first failure. Confirmed outages use the existing alarm and alert flow. Journey checks cover public HTTP responses. They do not submit forms, authenticate, or run page scripts. For a second vantage point, update the off-site worker to this release. Workers on earlier releases continue receiving the monitor types they already support.
+
 ## Planned maintenance
 
 Open **Maintenance** on a website monitor to start a window now or schedule one in your local time. The checks keep running at the usual interval, and the dashboard marks those results in the check history. During the window BeepNado suppresses outage and recovery alerts for that monitor and excludes the planned checks from its success rate. A public status page shows the upcoming or active window. End it early from the same dialog to resume normal alerting at the next check.

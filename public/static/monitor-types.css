@@ -1,0 +1,6 @@
+.monitor-types{padding-block:clamp(3rem,7vw,6rem)}
+.monitor-type-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,16rem),1fr));gap:1rem;max-width:72rem;margin:2rem auto 0;padding:0;list-style:none}
+.monitor-type-grid li{padding:1.25rem 1.4rem;background:#fff;border:1px solid #ebe2ed;border-radius:1rem}
+.monitor-type-grid li:first-child{border-color:#e9ad9d;background:#fff5ef}
+.monitor-type-grid h3{margin:0 0 .4rem;color:#25203c;font-size:1.05rem}
+.monitor-type-grid p{margin:0;color:#4b465c;line-height:1.6}
