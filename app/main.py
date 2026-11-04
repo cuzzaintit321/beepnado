@@ -24,6 +24,7 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlsplit
 
 import h11
@@ -144,6 +145,8 @@ def init_db():
           http_code INTEGER, response_ms INTEGER, cert_days INTEGER, error TEXT
         );
         CREATE INDEX IF NOT EXISTS checks_history ON checks(monitor_id,id DESC);
+        CREATE INDEX IF NOT EXISTS checks_report_period ON checks(monitor_id,checked_at)
+          WHERE region IN ('primary','heartbeat');
         CREATE INDEX IF NOT EXISTS checks_external_recent ON checks(monitor_id,checked_at)
           WHERE region NOT IN ('primary','maintenance','heartbeat');
         CREATE TABLE IF NOT EXISTS maintenance_windows(
@@ -160,6 +163,18 @@ def init_db():
           id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
           slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL, created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS client_pages(
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL, published INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS client_pages_by_user ON client_pages(user_id,id);
+        CREATE TABLE IF NOT EXISTS client_page_monitors(
+          page_id INTEGER NOT NULL REFERENCES client_pages(id) ON DELETE CASCADE,
+          monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
+          PRIMARY KEY(page_id,monitor_id)
+        );
+        CREATE INDEX IF NOT EXISTS client_page_monitors_by_monitor ON client_page_monitors(monitor_id);
         CREATE TABLE IF NOT EXISTS notifications(
           id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
@@ -836,7 +851,7 @@ def home():
 
 @app.get('/static/{filename}')
 def static(filename:str):
-    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js'):raise HTTPException(404)
+    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js'):raise HTTPException(404)
     return FileResponse(ROOT/'static'/filename)
 
 
@@ -1327,26 +1342,146 @@ class StatusInput(BaseModel):
     title:str=Field(min_length=3,max_length=70)
 
 
+class ClientPageInput(StatusInput):
+    monitor_ids: set[int] = Field(min_length=1, max_length=max(PLAN_LIMITS.values()))
+    published: bool = False
+
+
+@app.get('/api/client-pages')
+def list_client_pages(response: Response, user=Depends(require_user)):
+    response.headers['Cache-Control'] = 'no-store'
+    pages = {}
+    with db() as c:
+        for row in c.execute('''SELECT p.id,p.slug,p.title,p.published,pm.monitor_id
+            FROM client_pages p LEFT JOIN client_page_monitors pm ON pm.page_id=p.id
+            WHERE p.user_id=? ORDER BY p.title COLLATE NOCASE,p.id,pm.monitor_id''', (user['id'],)):
+            page = pages.setdefault(row['id'], {
+                'id': row['id'], 'slug': row['slug'], 'title': row['title'],
+                'published': bool(row['published']), 'monitor_ids': [],
+            })
+            if row['monitor_id'] is not None:
+                page['monitor_ids'].append(row['monitor_id'])
+    return list(pages.values())
+
+
+def save_client_page(data, user, page_id=None):
+    title = data.title.strip()
+    if len(title) < 3:
+        raise HTTPException(422, 'Enter a title with at least three characters')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        user_id = user['id']
+        if page_id is not None and not c.execute('SELECT 1 FROM client_pages WHERE id=? AND user_id=?',
+                                                 (page_id, user_id)).fetchone():
+            raise HTTPException(404, 'Client page unavailable')
+        owned = {row['id'] for row in c.execute('SELECT id FROM monitors WHERE user_id=?', (user_id,))}
+        if not data.monitor_ids <= owned:
+            raise HTTPException(422, 'Choose monitors in your workspace')
+        reserved = c.execute('''SELECT 1 FROM status_pages WHERE slug=?
+            UNION ALL SELECT 1 FROM client_pages WHERE slug=? AND id IS NOT ?''',
+            (data.slug, data.slug, page_id)).fetchone()
+        if reserved:
+            raise HTTPException(409, 'That address is already used')
+        if page_id is None:
+            count = c.execute('SELECT COUNT(*) FROM client_pages WHERE user_id=?', (user_id,)).fetchone()[0]
+            limit = c.execute('SELECT plan FROM users WHERE id=?', (user_id,)).fetchone()['plan']
+            if count >= PLAN_LIMITS[limit]:
+                raise HTTPException(403, 'Client page limit reached for your plan')
+            page_id = c.execute('INSERT INTO client_pages(user_id,slug,title,published) VALUES(?,?,?,?)',
+                                (user_id, data.slug, title, data.published)).lastrowid
+        else:
+            c.execute('UPDATE client_pages SET slug=?,title=?,published=? WHERE id=?',
+                      (data.slug, title, data.published, page_id))
+            c.execute('DELETE FROM client_page_monitors WHERE page_id=?', (page_id,))
+        c.executemany('INSERT INTO client_page_monitors(page_id,monitor_id) VALUES(?,?)',
+                      ((page_id, monitor_id) for monitor_id in data.monitor_ids))
+    return {'id': page_id}
+
+
+@app.post('/api/client-pages', status_code=201)
+def create_client_page(data: ClientPageInput, user=Depends(require_csrf)):
+    return save_client_page(data, user)
+
+
+@app.put('/api/client-pages/{page_id}')
+def update_client_page(page_id: int, data: ClientPageInput, user=Depends(require_csrf)):
+    return save_client_page(data, user, page_id)
+
+
+@app.delete('/api/client-pages/{page_id}')
+def delete_client_page(page_id: int, user=Depends(require_csrf)):
+    with db() as c:
+        if not c.execute('DELETE FROM client_pages WHERE id=? AND user_id=?', (page_id, user['id'])).rowcount:
+            raise HTTPException(404, 'Client page unavailable')
+    return {'ok': True}
+
+
+@app.get('/api/client-pages/{page_id}/report')
+def client_report(page_id: int, response: Response, days: Literal['7', '30'] = '30', user=Depends(require_user)):
+    response.headers['Cache-Control'] = 'no-store'
+    end = datetime.now(timezone.utc)
+    until = end.isoformat(timespec='seconds')
+    since = (end - timedelta(days=int(days))).isoformat(timespec='seconds')
+    with db() as c:
+        c.execute('BEGIN')
+        page = c.execute('SELECT title,slug,published FROM client_pages WHERE id=? AND user_id=?',
+                         (page_id, user['id'])).fetchone()
+        if not page:
+            raise HTTPException(404, 'Client page unavailable')
+        monitors = [dict(row) for row in c.execute('''
+            SELECT m.name,COUNT(ch.id) AS samples,
+                   COUNT(CASE WHEN ch.state='up' THEN 1 END) AS passed,
+                   COUNT(CASE WHEN ch.state='down' THEN 1 END) AS failed,
+                   ROUND(AVG(CASE WHEN ch.state='up' THEN ch.response_ms END)) AS avg_ms,
+                   (SELECT COUNT(*) FROM incidents i WHERE i.monitor_id=m.id AND i.opened_at<=?
+                      AND (i.resolved_at IS NULL OR i.resolved_at>?)) AS incidents
+            FROM client_page_monitors pm JOIN monitors m ON m.id=pm.monitor_id
+            LEFT JOIN checks ch ON ch.monitor_id=m.id AND ch.region IN ('primary','heartbeat')
+                 AND ch.checked_at>=? AND ch.checked_at<=?
+            WHERE pm.page_id=? AND m.user_id=? GROUP BY m.id ORDER BY m.name,m.id
+        ''', (until, since, since, until, page_id, user['id']))]
+    return {'title': page['title'], 'status_path': '/s/' + page['slug'] if page['published'] else None,
+            'since': since, 'until': until, 'monitors': monitors}
+
+
 @app.post('/api/status-page')
 def set_status(input:StatusInput,user=Depends(require_csrf)):
     with db() as c:
+        c.execute('BEGIN IMMEDIATE')
         owner=c.execute('SELECT user_id FROM status_pages WHERE slug=?',(input.slug,)).fetchone()
-        if owner and owner['user_id']!=user['id']:raise HTTPException(409,'That address is already used')
+        if ((owner and owner['user_id'] != user['id']) or
+                c.execute('SELECT 1 FROM client_pages WHERE slug=?', (input.slug,)).fetchone()):
+            raise HTTPException(409,'That address is already used')
         c.execute('''INSERT INTO status_pages(user_id,slug,title,created_at) VALUES(?,?,?,?)
                      ON CONFLICT(user_id) DO UPDATE SET slug=excluded.slug,title=excluded.title''',(user['id'],input.slug,input.title.strip(),now()))
     return {'ok':True,'url':'/s/'+input.slug}
 
 
+def public_status_page(c, slug):
+    row = c.execute('''SELECT user_id,title,NULL AS page_id FROM status_pages WHERE slug=?
+        UNION ALL SELECT user_id,title,id FROM client_pages WHERE slug=? AND published=1''',
+        (slug, slug)).fetchone()
+    if not row:
+        raise HTTPException(404, 'Status page unavailable', headers={'Cache-Control': 'no-store'})
+    return row
+
+
+STATUS_MONITOR_SCOPE = '''AND m.user_id=? AND (? IS NULL OR EXISTS (
+    SELECT 1 FROM client_page_monitors pm WHERE pm.page_id=? AND pm.monitor_id=m.id))'''
+
+
 @app.get('/api/public-status/{slug}')
-def status_page(slug:str):
+def status_page(slug: str, response: Response):
+    response.headers['Cache-Control'] = 'no-store'
     with db() as c:
-        row=c.execute('SELECT user_id,title FROM status_pages WHERE slug=?',(slug,)).fetchone()
-        if not row:raise HTTPException(404,'Status page unavailable')
+        c.execute('BEGIN')
+        row = public_status_page(c, slug)
+        scope = (row['user_id'], row['page_id'], row['page_id'])
         clock = now()
         windows = scheduled_maintenance(c, row['user_id'], clock)
         mons = []
         for monitor in c.execute('SELECT m.id,m.name,m.state,m.last_checked,m.maintenance_last_checked ' +
-                                 ACTIVE_MONITORS + ' AND m.user_id=? ORDER BY m.name', (row['user_id'],)):
+                                 ACTIVE_MONITORS + STATUS_MONITOR_SCOPE + ' ORDER BY m.name', scope):
             window = windows.get(monitor['id'])
             mons.append({
                 'name': monitor['name'],
@@ -1354,15 +1489,20 @@ def status_page(slug:str):
                 'last_checked': monitor['maintenance_last_checked'] or monitor['last_checked'],
                 'maintenance': {'starts_at': window['starts_at'], 'ends_at': window['ends_at']} if window else None,
             })
-        incidents=[{'monitor':x['name'],'opened_at':x['opened_at'],'resolved_at':x['resolved_at']} for x in c.execute('''SELECT m.name,i.opened_at,i.resolved_at FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE m.user_id=? ORDER BY i.id DESC LIMIT 5''',(row['user_id'],))]
-    return {'title':row['title'],'monitors':mons,'incidents':incidents,'observed_at':now()}
+        incidents = [dict(incident) for incident in c.execute('''
+            SELECT m.name AS monitor,i.opened_at,i.resolved_at
+            FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE 1=1
+        ''' + STATUS_MONITOR_SCOPE + ' ORDER BY i.id DESC LIMIT 5', scope)]
+    return {'title':row['title'],'monitors':mons,'incidents':incidents,'observed_at':clock}
 
 
 @app.get('/s/{slug}')
 def status_html(slug:str):
     with db() as c:
-        if not c.execute('SELECT 1 FROM status_pages WHERE slug=?',(slug,)).fetchone():raise HTTPException(404)
-    return FileResponse(ROOT/'static'/'index.html')
+        public_status_page(c, slug)
+    return FileResponse(ROOT/'static'/'index.html', headers={
+        'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex',
+    })
 
 
 def get_stripe():

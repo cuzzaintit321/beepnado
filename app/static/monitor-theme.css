@@ -222,3 +222,22 @@
 .bn-network-notice{border:1px solid #9d7347;border-radius:12px;background:#3e3020;color:#ffe0ab;padding:12px 15px}
 .bn-monitor-meta small.bn-check-detail{color:#b9cfea}
 .bn-monitor-fields select{width:100%}
+
+/* Client pages and monitoring reports */
+.client-page-layout{display:grid;grid-template-columns:minmax(200px,1fr) minmax(0,2fr);gap:16px;align-items:start}
+.client-page-list{display:grid;gap:8px;margin:12px 0}
+.client-page-choice{display:grid;gap:4px;text-align:left;overflow-wrap:anywhere}
+.client-page-choice small{color:#a9bed0;font-weight:400}
+.client-page-choice[aria-pressed="true"]{border-color:#ff9a73}
+.client-monitors{border:1px solid #36475a;border-radius:8px;padding:8px 12px;max-height:240px;overflow:auto}
+.client-monitors legend{padding:0 4px}
+.client-monitors label,.work-form .client-publish{display:flex;align-items:center;gap:8px;padding:4px 0}
+.client-monitors label span{overflow-wrap:anywhere}
+.client-monitors input[type="checkbox"],.client-publish input[type="checkbox"]{width:auto;margin:0}
+.client-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.client-actions select,.client-report textarea{background:#121a28;color:#e8eef7;border:1px solid #4b5d72;border-radius:8px;padding:8px}
+.client-report{grid-column:1/-1}
+#client-report-result{margin-top:12px}
+.client-report-preview{display:grid;gap:6px;margin-bottom:8px}
+.client-report textarea{width:100%;box-sizing:border-box;resize:vertical;line-height:1.5}
+@media(max-width:760px){.client-page-layout{grid-template-columns:minmax(0,1fr)}}

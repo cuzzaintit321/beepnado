@@ -1,0 +1,38 @@
+diff --git a/app/static/app.js b/app/static/app.js
+index a970e71..65ba21a 100644
+--- a/app/static/app.js
++++ b/app/static/app.js
+@@ -76,13 +76,14 @@ function selectView(v){view=v;renderView();}
+ function renderView(){
+  if(!dash)return;
+  document.querySelectorAll('.side-link').forEach(e=>e.classList.toggle('active',e.dataset.view===view));
+- const names={overview:'Overview',monitors:'Website monitors',incidents:'Incident history',alerts:'Alert feed',status:'Public status page',billing:'Plan & billing'};
++ const names={overview:'Overview',monitors:'Website monitors',incidents:'Incident history',alerts:'Alert feed',status:'Public status page',clients:'Client pages',billing:'Plan & billing'};
+  $('view-heading').textContent=names[view]||'Overview';$('view-crumb').textContent=(names[view]||'Overview').toUpperCase();
+  if(view==='overview')return overview();
+  if(view==='monitors')return monitors();
+  if(view==='incidents')return incidents();
+  if(view==='alerts')return alerts();
+  if(view==='status')return statusSettings();
++ if(view==='clients')return renderClientPages();
+  if(view==='billing')return billing();
+ }
+ const empty = (title,text) => `<div class="empty-data"><strong>${title}</strong>${text}</div>`;
+@@ -141,7 +142,7 @@ async function renderPublicStatus(slug){
+    const bad=s.monitors.some(m=>m.state==='down');
+    const maintenance=s.monitors.some(m=>m.state==='maintenance');
+    const pending=s.monitors.some(m=>!['up','maintenance'].includes(m.state));
+-   const message=bad?'● One or more services are currently reporting downtime'
++   const message=!s.monitors.length?'◌ No services currently listed':bad?'● One or more services are currently reporting downtime'
+      :maintenance?'◌ Planned maintenance is in progress'
+      :pending?'◌ Some services have not confirmed a healthy state':'✓ All monitored services are operational';
+    const rows = s.monitors.map(m => {
+@@ -153,7 +154,7 @@ async function renderPublicStatus(slug){
+        <td>${pill(m.state)}${schedule ? '<div class="small-muted">' + esc(schedule) + '</div>' : ''}</td>
+        <td>${fmt(m.last_checked)}</td></tr>`;
+    }).join('');
+-   $('status-body').innerHTML=`<span class="kicker">SERVICE HEALTH</span><h1>${esc(s.title)}</h1><p>Last loaded: ${fmt(s.observed_at)}</p><div class="status-banner ${bad?'alert':''}">${message}</div><div class="panel"><h3>Services</h3>${s.monitors.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Status</th><th>Last checked</th></tr></thead><tbody>${rows}</tbody></table></div>`:empty('No public services listed','The account has not added a monitor.')}</div><div class="panel"><h3>Recent incidents</h3>${s.incidents.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Opened</th><th>Recovered</th></tr></thead><tbody>${s.incidents.map(i=>`<tr><td>${esc(i.monitor)}</td><td>${fmt(i.opened_at)}</td><td>${i.resolved_at?fmt(i.resolved_at):'Ongoing'}</td></tr>`).join('')}</tbody></table></div>`:empty('No incidents recorded','This page only displays incidents already observed by the monitor.')}</div><p class="billing-note">Displayed values reflect the latest recorded monitor observations.</p>`;
++   $('status-body').innerHTML=`<span class="kicker">SERVICE HEALTH</span><h1>${esc(s.title)}</h1><p>Last loaded: ${fmt(s.observed_at)}</p><div class="status-banner ${bad?'alert':''}">${message}</div><div class="panel"><h3>Services</h3>${s.monitors.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Status</th><th>Last checked</th></tr></thead><tbody>${rows}</tbody></table></div>`:empty('No public services listed','This status page has no active services to show.')}</div><div class="panel"><h3>Recent incidents</h3>${s.incidents.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Opened</th><th>Recovered</th></tr></thead><tbody>${s.incidents.map(i=>`<tr><td>${esc(i.monitor)}</td><td>${fmt(i.opened_at)}</td><td>${i.resolved_at?fmt(i.resolved_at):'Ongoing'}</td></tr>`).join('')}</tbody></table></div>`:empty('No incidents recorded','This page only displays incidents already observed by the monitor.')}</div><p class="billing-note">Displayed values reflect the latest recorded monitor observations.</p>`;
+  }catch(e){$('status-body').innerHTML=`<h1>Status page unavailable</h1><p>${esc(e.message)}</p>`}
+ }
+ async function init(){

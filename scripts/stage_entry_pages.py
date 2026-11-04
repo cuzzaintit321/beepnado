@@ -71,6 +71,17 @@ def stage_workspace(previous, release):
         previous = previous.replace(matched(APP_BACK, previous), link, 1)
     previous = re.sub(r'<meta property="og:[^>]+>\n?', '', previous)
     previous = re.sub(r'<footer id="site-footer">.*?</footer>\n?', '', previous, flags=re.S)
+    for pattern in (r'<link rel="stylesheet" href="/static/monitor-theme\.css(?:\?[^"]*)?">',
+                    r'<script src="/static/app\.js(?:\?[^"]*)?" defer></script>'):
+        previous = replace(pattern, previous, release)
+    client_script = matched(r'<script src="/static/client-pages\.js" defer></script>', release)
+    if client_script not in previous:
+        anchor = matched(r'<script src="/static/monitor-view\.js(?:\?[^"]*)?" defer></script>', previous)
+        previous = previous.replace(anchor, anchor + client_script, 1)
+    client_nav = matched(r'<button class="side-link" data-view="clients">[^<]+</button>', release)
+    if client_nav not in previous:
+        anchor = matched(r'<button class="side-link" data-view="billing">', previous)
+        previous = previous.replace(anchor, client_nav + anchor, 1)
     for marker in ('id="account-screen"', 'id="account-form"', 'id="workspace"', 'id="public-status"'):
         if previous.count(marker) != 1:
             raise ValueError(f'Workspace entry requires one {marker}')
