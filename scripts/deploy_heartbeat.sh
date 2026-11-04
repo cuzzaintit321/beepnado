@@ -72,6 +72,9 @@ verify_public_files() {
 }
 
 if [[ "${1:-}" == --public-only && $# == 1 ]]; then
+    if [[ -f "$public_root/static/launch-proof.css" ]]; then
+        public_assets+=(static/launch-proof.css)
+    fi
     backup="$(mktemp -d "$state/marketing-backup.XXXXXXXX")"
     backup_public_files
     python3 "$release/scripts/stage_entry_pages.py" --public-only "$release" \

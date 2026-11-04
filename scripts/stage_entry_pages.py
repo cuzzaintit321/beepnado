@@ -41,6 +41,8 @@ def replace(pattern, previous, release):
 
 
 def stage_public(previous, release, *, include_launch=True):
+    previous = re.sub(r'<section id="compare"[^>]*>.*?</section>\n?', '', previous, flags=re.S)
+    previous = previous.replace('<a href="#compare">Compare</a> · ', '')
     previous = replace(HERO, previous, release)
     head = matched(r'<head>.*?</head>', previous)
     updated = head
@@ -78,7 +80,6 @@ def stage_public(previous, release, *, include_launch=True):
             previous = previous.replace('</head>', matched(LAUNCH_STYLE, release) + '\n</head>', 1)
         for section_id, anchor in (
             ('switching', r'<section class="section pricing" id="pricing">'),
-            ('compare', r'<section class="closing">'),
             ('faq', r'<section class="closing">'),
         ):
             pattern = rf'<section id="{section_id}"[^>]*>.*?</section>'
