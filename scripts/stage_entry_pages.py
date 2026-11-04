@@ -72,12 +72,22 @@ def stage_workspace(previous, release):
     previous = re.sub(r'<meta property="og:[^>]+>\n?', '', previous)
     previous = re.sub(r'<footer id="site-footer">.*?</footer>\n?', '', previous, flags=re.S)
     for pattern in (r'<link rel="stylesheet" href="/static/monitor-theme\.css(?:\?[^"]*)?">',
-                    r'<script src="/static/app\.js(?:\?[^"]*)?" defer></script>'):
+                    r'<script src="/static/app\.js(?:\?[^"]*)?" defer></script>',
+                    r'<script src="/static/monitor-view\.js(?:\?[^"]*)?" defer></script>'):
         previous = replace(pattern, previous, release)
     client_script = matched(r'<script src="/static/client-pages\.js" defer></script>', release)
     if client_script not in previous:
         anchor = matched(r'<script src="/static/monitor-view\.js(?:\?[^"]*)?" defer></script>', previous)
         previous = previous.replace(anchor, anchor + client_script, 1)
+    alarm_script = matched(r'<script src="/static/outage-alarm\.js" defer></script>', release)
+    if alarm_script not in previous:
+        previous = previous.replace(client_script, client_script + alarm_script, 1)
+    alarm_section = r'<section id="outage-alarm"[^>]*>.*?</section>'
+    if re.search(alarm_section, previous, re.S):
+        previous = replace(alarm_section, previous, release)
+    else:
+        anchor = matched(r'<div id="work-content"></div>', previous)
+        previous = previous.replace(anchor, matched(alarm_section, release) + '\n' + anchor, 1)
     client_nav = matched(r'<button class="side-link" data-view="clients">[^<]+</button>', release)
     if client_nav not in previous:
         anchor = matched(r'<button class="side-link" data-view="billing">', previous)

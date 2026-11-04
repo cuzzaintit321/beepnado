@@ -108,15 +108,15 @@ expect_release_file() {
     return 1
 }
 
-expect_release_file app/main.py 1556f3cdee407dee2ce939a4c081a972ca5b042f2fce5ec8888e4f8c3a1c52d9 463d79e4917dab6a5874dc9a56081a997186bf3a486204f8a73475047bd62c3c 0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1 b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e 8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676 eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370 6eed33a5ba88ed3f848c3766df539ffe6fabd3e3bbd2c7087b28026d78e36ed5 7deb7b032a1862afd200f69328ea204ebca3bea323861f3f0829fb02f8c9f62b
-expect_release_file app/static/monitor-view.js d7569b521cb79c9bea42afdfb0f043c97b8f0fdcdda7f76c53e65a8518af72b6 a2997738a91b875bccf9709ff7638e5ed510b9947bbc44a3f4aebd4e5a65deae 4a165fd2c214fa63496f7fa6721b5bd1a00ccb65de529c50d234ea23f5e8f00e 4fcefd3fddef0046279c0733450466b0377f5553d679eb9d9f57c5c7b588014f 97deadce2c8cb6be49432d8f77d803b9ba98a7b1736e99505c28b8ac0818c5f5 b3a34f0bc39bae085f292d87f347efa25967bd13ff6804302668672e04496e30
+expect_release_file app/main.py b444cf0943d58e464518daf20248614237c0cd5d86d3f19ad151b43607a698c1 1556f3cdee407dee2ce939a4c081a972ca5b042f2fce5ec8888e4f8c3a1c52d9 463d79e4917dab6a5874dc9a56081a997186bf3a486204f8a73475047bd62c3c 0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1 b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e 8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676 eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370 6eed33a5ba88ed3f848c3766df539ffe6fabd3e3bbd2c7087b28026d78e36ed5 7deb7b032a1862afd200f69328ea204ebca3bea323861f3f0829fb02f8c9f62b
+expect_release_file app/static/monitor-view.js d426c4763c335060b9594c10e9dcc67c820ff47c87d6614f09888f804f33026a d7569b521cb79c9bea42afdfb0f043c97b8f0fdcdda7f76c53e65a8518af72b6 a2997738a91b875bccf9709ff7638e5ed510b9947bbc44a3f4aebd4e5a65deae 4a165fd2c214fa63496f7fa6721b5bd1a00ccb65de529c50d234ea23f5e8f00e 4fcefd3fddef0046279c0733450466b0377f5553d679eb9d9f57c5c7b588014f 97deadce2c8cb6be49432d8f77d803b9ba98a7b1736e99505c28b8ac0818c5f5 b3a34f0bc39bae085f292d87f347efa25967bd13ff6804302668672e04496e30
 expect_release_file requirements.txt c7b3d34378d337125cc58d87dd542b70322cffac63339196e5c23cdfeb9c9cef ab59b5f98e5e75669346e0f877691470741461658fdaee164162ac885ebc8be4
 
 staged_main="$state/release/app/main.py"
 if [[ -f "$staged_main" ]] && ! cmp -s "$staged_main" "$release/app/main.py"; then
     read -r staged_digest _ < <(sha256sum -- "$staged_main")
     case "$staged_digest" in
-        1556f3cdee407dee2ce939a4c081a972ca5b042f2fce5ec8888e4f8c3a1c52d9|0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1|b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e|8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676|eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370|6eed33a5ba88ed3f848c3766df539ffe6fabd3e3bbd2c7087b28026d78e36ed5|7deb7b032a1862afd200f69328ea204ebca3bea323861f3f0829fb02f8c9f62b) ;;
+        b444cf0943d58e464518daf20248614237c0cd5d86d3f19ad151b43607a698c1|1556f3cdee407dee2ce939a4c081a972ca5b042f2fce5ec8888e4f8c3a1c52d9|0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1|b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e|8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676|eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370|6eed33a5ba88ed3f848c3766df539ffe6fabd3e3bbd2c7087b28026d78e36ed5|7deb7b032a1862afd200f69328ea204ebca3bea323861f3f0829fb02f8c9f62b) ;;
         *) echo 'Existing paid release was modified. Review before updating.' >&2; exit 1 ;;
     esac
 fi
@@ -124,7 +124,7 @@ fi
 backup="$(mktemp -d "$state/monitoring-backup.XXXXXXXX")"
 files=(app/main.py app/static/index.html app/static/app.js app/static/monitor-view.js app/static/monitor-theme.css requirements.txt compose.yaml Dockerfile)
 cp -p --parents -- "${files[@]}" "$backup"
-optional_files=(app/network_checks.py app/static/client-pages.js)
+optional_files=(app/network_checks.py app/static/client-pages.js app/static/outage-alarm.js)
 for file in "${optional_files[@]}"; do
     if [[ -f "$file" ]]; then cp -p --parents -- "$file" "$backup"; fi
 done
@@ -268,7 +268,7 @@ docker compose config -q
 cp -- "$release/app/static/monitor-view.js" app/static/monitor-view.js
 cp -- "$release/requirements.txt" requirements.txt
 # Preserve local styling by appending each missing section.
-for marker in '/* Configurable check rules */' '/* Heartbeat monitors */' '/* Planned maintenance */' '/* Public probe evidence */' '/* Workspace entry */' '/* Network monitor evidence */' '/* Client pages and monitoring reports */'; do
+for marker in '/* Configurable check rules */' '/* Heartbeat monitors */' '/* Planned maintenance */' '/* Public probe evidence */' '/* Workspace entry */' '/* Network monitor evidence */' '/* Client pages and monitoring reports */' '/* Outage alarm */'; do
     if ! grep -Fxq "$marker" app/static/monitor-theme.css; then
         printf '\n' >> app/static/monitor-theme.css
         awk -v marker="$marker" '
@@ -293,7 +293,11 @@ caddy /static/monitor-view.js >"$backup/served-monitor-view.js"
 cmp app/static/monitor-view.js "$backup/served-monitor-view.js"
 caddy /static/client-pages.js >"$backup/served-client-pages.js"
 cmp app/static/client-pages.js "$backup/served-client-pages.js"
+caddy /static/outage-alarm.js >"$backup/served-outage-alarm.js"
+cmp app/static/outage-alarm.js "$backup/served-outage-alarm.js"
 status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 12 --resolve app.beepnado.com:443:127.0.0.1 https://app.beepnado.com/api/client-pages)"
+[[ "$status" == 401 ]]
+status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 12 --resolve app.beepnado.com:443:127.0.0.1 https://app.beepnado.com/api/alarm-incidents)"
 [[ "$status" == 401 ]]
 caddy /static/monitor-theme.css >"$backup/served-monitor-theme.css"
 cmp app/static/monitor-theme.css "$backup/served-monitor-theme.css"
@@ -316,5 +320,5 @@ if [[ -f "$staged_main" ]]; then
     cp -- "$release/app/main.py" "$staged_main"
 fi
 trap - ERR INT TERM
-echo 'Marketing SEO, workspace entry, monitoring, and client pages deployed and verified through Caddy.'
+echo 'Marketing SEO, workspace entry, monitoring, client pages, and outage alarm deployed and verified through Caddy.'
 echo "Backup: $backup"

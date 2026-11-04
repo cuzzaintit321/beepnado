@@ -128,15 +128,22 @@ class BeepNadoTests(unittest.TestCase):
         failure=dict(state='down',http_code=503,response_ms=450,cert_days=None,error='HTTP 503')
         main.record_check(mid,failure)
         self.assertEqual(self.client.get('/api/dashboard').json()['notifications'],[])
+        self.assertEqual(self.client.get('/api/alarm-incidents').json()['incidents'], [])
         main.record_check(mid,failure)
         notices=self.client.get('/api/dashboard').json()['notifications']
         self.assertEqual(len(notices),1)
         self.assertEqual(notices[0]['kind'],'outage')
-        main.record_check(mid,dict(state='up',http_code=200,response_ms=90,cert_days=60,error=None))
-        notices=self.client.get('/api/dashboard').json()['notifications']
-        self.assertEqual(len(notices),2)
-        self.assertEqual(notices[0]['kind'],'recovery')
+        alarm = self.client.get('/api/alarm-incidents')
+        self.assertEqual(alarm.headers['Cache-Control'], 'no-store')
+        self.assertEqual(alarm.json()['account_id'], self.client.get('/api/me').json()['user']['id'])
+        incident, = alarm.json()['incidents']
+        self.assertEqual(incident['monitor_id'], mid)
+        self.assertEqual(incident['monitor_name'], 'Checkout Website')
+        self.assertEqual(incident['opening_evidence']['http_code'], 503)
+        main.record_check(mid,failure)
+        self.assertEqual(self.client.get('/api/alarm-incidents').json()['incidents'], [incident])
         with TestClient(main.app) as second_user:
+            self.assertEqual(second_user.get('/api/alarm-incidents').status_code, 401)
             with patch.object(main,'send_email') as mail:
                 r=second_user.post('/api/register',json={
                     'email':f'other-{os.urandom(5).hex()}@example.org',
@@ -144,6 +151,13 @@ class BeepNadoTests(unittest.TestCase):
             self.assertEqual(r.status_code,202)
             second_user.post('/api/verify-email',json={'token':re.search(r'#verify=([^\s]+)',mail.call_args.args[2]).group(1)},headers={'Origin':'http://testserver'})
             self.assertEqual(second_user.get('/api/dashboard').json()['notifications'],[])
+            self.assertEqual(second_user.get('/api/alarm-incidents').json()['incidents'], [])
+
+        main.record_check(mid,dict(state='up',http_code=200,response_ms=90,cert_days=60,error=None))
+        notices=self.client.get('/api/dashboard').json()['notifications']
+        self.assertEqual(len(notices),2)
+        self.assertEqual(notices[0]['kind'],'recovery')
+        self.assertEqual(self.client.get('/api/alarm-incidents').json()['incidents'], [])
 
     def test_public_status_reports_observed_monitor_checks(self):
         slug='public-'+os.urandom(5).hex()

@@ -32,6 +32,10 @@ In the workspace, open **Client pages**, give the page a title and slug, and sel
 
 A saved client page can generate a 7-day or 30-day report, even while it is a draft. Reports include sampled pass rates, confirmed-down and uncertain observations, average response time for passing checks, and incident counts for the selected monitors. Copy the report or download it as text. Primary checks and heartbeat observations count toward the report. Check pass rates describe recorded samples rather than continuous availability.
 
+## Dashboard outage alarm
+
+Select **Arm alarm** in the workspace to hear two short beeps when BeepNado first observes a newly confirmed outage. **Test sound** plays the signal on demand. The incident banner links to **Investigate**. **Mute alarm** silences it. Arm the alarm again after reloading, and keep the dashboard tab open with browser audio enabled.
+
 ## Public monitoring from a second network
 
 Deploy the worker on a separate network so it can check public DNS, TLS, and HTTP even if the main BeepNado server is offline. On that host, copy `.worker.env.example` to `.worker.env` with mode 600. Set `WORKER_WATCH_URLS` to the HTTPS URLs you operate, then start the worker:

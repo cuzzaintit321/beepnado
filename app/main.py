@@ -159,6 +159,7 @@ def init_db():
           id INTEGER PRIMARY KEY, monitor_id INTEGER NOT NULL REFERENCES monitors(id) ON DELETE CASCADE,
           opened_at TEXT NOT NULL, resolved_at TEXT, summary TEXT NOT NULL
         );
+        CREATE INDEX IF NOT EXISTS incidents_open ON incidents(monitor_id) WHERE resolved_at IS NULL;
         CREATE TABLE IF NOT EXISTS status_pages(
           id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
           slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL, created_at TEXT NOT NULL
@@ -851,7 +852,7 @@ def home():
 
 @app.get('/static/{filename}')
 def static(filename:str):
-    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js'):raise HTTPException(404)
+    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js','outage-alarm.js'):raise HTTPException(404)
     return FileResponse(ROOT/'static'/filename)
 
 
@@ -1006,6 +1007,20 @@ def displayed_state(monitor, window, clock):
     if monitor['maintenance_last_checked'] and monitor['state'] != 'down':
         return 'pending'
     return monitor['state']
+
+
+@app.get('/api/alarm-incidents')
+def alarm_incidents(user=Depends(require_user)):
+    with db() as c:
+        incidents = [dict(row) for row in c.execute('''
+            SELECT i.id,i.monitor_id,i.opened_at,i.opening_evidence,m.name AS monitor_name
+            FROM monitors m JOIN incidents i ON i.monitor_id=m.id
+            WHERE m.user_id=? AND i.resolved_at IS NULL ORDER BY i.id DESC
+        ''', (user['id'],))]
+    for incident in incidents:
+        if incident['opening_evidence']:
+            incident['opening_evidence'] = json.loads(incident['opening_evidence'])
+    return {'account_id': user['id'], 'incidents': incidents}
 
 
 @app.get('/api/dashboard')

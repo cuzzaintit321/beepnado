@@ -241,3 +241,13 @@
 .client-report-preview{display:grid;gap:6px;margin-bottom:8px}
 .client-report textarea{width:100%;box-sizing:border-box;resize:vertical;line-height:1.5}
 @media(max-width:760px){.client-page-layout{grid-template-columns:minmax(0,1fr)}}
+
+/* Outage alarm */
+.workspace .bn-alarm{margin-bottom:16px;padding:14px 16px}
+.bn-alarm-toolbar,.bn-alarm-actions,.bn-alarm-banner li{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 14px}
+.workspace .bn-alarm h3{margin:0 0 3px;font-size:15px}
+.bn-alarm-toolbar p{margin:0;color:#a9bed0;font-size:13px}
+.bn-alarm-banner{margin-top:12px;padding:10px 12px;background:#40252e;border:1px solid #693e4a;border-radius:8px}
+.bn-alarm-banner p{margin:0 0 6px;color:#ffacb6;font-weight:700}
+.bn-alarm-banner ul{margin:0;padding:0;list-style:none}
+.bn-alarm-banner li{padding:4px 0;overflow-wrap:anywhere}

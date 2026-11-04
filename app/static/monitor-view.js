@@ -137,8 +137,8 @@
       check.response_ms == null ? '' : check.response_ms + ' ms', check.detail, check.error].filter(Boolean).join(' · ');
   }
 
-  function investigateMonitor(m, incident) {
-    const checks=getChecks().filter(c=>Number(c.monitor_id)===Number(m.id)).slice(0,10);
+  function investigateMonitor(m, incident, observations) {
+    const checks=observations.filter(c=>Number(c.monitor_id)===Number(m.id)).slice(0,10);
     const heartbeat=m.kind==='heartbeat';
     const region=heartbeat?'heartbeat':'primary';
     const maintenanceCheck = checks.find(c=>c.region==='maintenance' && c.checked_at===m.maintenance_last_checked);
@@ -495,6 +495,17 @@
       </div><aside class="bn-aside">${sideSnapshot()}<section class="bn-panel bn-tip"><h3>Quick actions</h3><button class="bn-btn bn-btn-primary bn-btn-wide" data-view="monitors">+ Add monitor</button><button class="bn-btn bn-btn-quiet bn-btn-wide" data-view="status">Manage status page ↗</button></section></aside></div>`;
   };
 
+  function openInvestigator(monitorId, incidentId, fallback, snapshot = dash) {
+    const monitor = (snapshot?.monitors || []).find(m => Number(m.id) === Number(monitorId));
+    if (!monitor) return false;
+    const incident = (snapshot?.incidents || []).find(i => Number(i.id) === Number(incidentId)
+      && Number(i.monitor_id) === Number(monitorId) && (!fallback || i.opened_at === fallback.opened_at));
+    investigateMonitor(monitor, incident || fallback, snapshot.checks || []);
+    return true;
+  }
+
+  window.investigateOutage = (incident, snapshot) => openInvestigator(incident.monitor_id, incident.id, incident, snapshot);
+
   const main = document.getElementById('work-content');
   main?.addEventListener('input', e => {
     if (e.target.id === 'bn-search') { filterState.query = e.target.value; paintMonitorResults(); }
@@ -526,9 +537,7 @@
       return;
     }
     if (button.hasAttribute('data-investigate')) {
-      const monitor=getMonitors().find(m=>Number(m.id)===Number(button.dataset.investigate));
-      const incident = (dash?.incidents || []).find(i=>Number(i.id)===Number(button.dataset.incidentId));
-      if(monitor) investigateMonitor(monitor, incident);
+      openInvestigator(button.dataset.investigate, button.dataset.incidentId);
       return;
     }
     if (button.hasAttribute('data-bn-new')) {
