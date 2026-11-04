@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BeepNado Service Status</title>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="stylesheet" href="/static/site.css">
+</head>
+<body>
+<main class="public-status">
+  <div class="status-bar"><a class="brand" href="https://beepnado.com/">Beep<span class="brand-accent">Nado</span></a><span>Service status</span></div>
+  <div class="status-body">
+    <span class="kicker">LIVE SERVICE CHECK</span>
+    <h1>BeepNado service status</h1>
+    <p>Observed <time datetime="__CHECK_TIME__">__CHECK_TIME__</time></p>
+    <div id="service-readiness" class="status-banner __STATUS_CLASS__">__STATUS_MESSAGE__</div>
+    <div class="panel">
+      <h2>Application and database</h2>
+      <p>This page runs the app’s database readiness check when you load it. It shows what this server observed at that moment. Independent monitoring is needed to measure public uptime over time.</p>
+      <a class="work-btn" href="/status">Run live check again</a>
+      <a class="work-btn alt" href="https://beepnado.com/#how">See how BeepNado works</a>
+    </div>
+  </div>
+</main>
+</body>
+</html>

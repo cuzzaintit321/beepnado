@@ -4,7 +4,8 @@ import re
 import sys
 
 
-HERO = r'<div class="hero-copy">.*?(?=<div class="hero-visual">)'
+HERO_VISUAL = r'<div class="hero-visual(?: [^"]*)?">'
+HERO = rf'<div class="hero-copy">.*?(?={HERO_VISUAL})'
 TITLE = r'<title>[^<]+</title>'
 DESCRIPTION = r'<meta name="description"[^>]+>'
 PUBLIC_HEAD_TAGS = (
@@ -19,6 +20,12 @@ MONITOR_TYPES_STYLE = r'<link rel="stylesheet" href="/static/monitor-types\.css"
 FOOTER_CREDIT = r'<span data-reboot-credit>[^<]*<a[^>]+>[^<]+</a>[^<]*</span>'
 ENTRY = r'<p id="app-loading".*?(?=<section id="account-screen")'
 OLD_APP_MARKETING = r'<header class="nav">.*?</main>\s*(?=<section id="account-screen")'
+HERO_PREVIEW = HERO_VISUAL + r'.*?(?=</section>)'
+NAV_MENU = r'<nav class="nav-menu">.*?</nav>'
+NAV_ACTIONS = r'<div class="nav-actions">.*?</div>'
+PRICING = r'<section class="section pricing" id="pricing">.*?</section>'
+LAUNCH_STYLE = r'<link rel="stylesheet" href="/static/launch-proof\.css">'
+LAUNCH_FOOTER = r'<span data-launch-links>.*?</span>'
 APP_BACK = r'<button\b[^>]*\bid="account-back"[^>]*>.*?</button>'
 
 
@@ -33,7 +40,7 @@ def replace(pattern, previous, release):
     return previous.replace(matched(pattern, previous), matched(pattern, release), 1)
 
 
-def stage_public(previous, release):
+def stage_public(previous, release, *, include_launch=True):
     previous = replace(HERO, previous, release)
     head = matched(r'<head>.*?</head>', previous)
     updated = head
@@ -64,6 +71,27 @@ def stage_public(previous, release):
         if old_credit in footer:
             updated_footer = footer.replace(old_credit, matched(FOOTER_CREDIT, release), 1)
             previous = previous.replace(footer, updated_footer, 1)
+    if include_launch:
+        for pattern in (HERO_PREVIEW, NAV_MENU, NAV_ACTIONS, PRICING):
+            previous = replace(pattern, previous, release)
+        if not re.search(LAUNCH_STYLE, previous):
+            previous = previous.replace('</head>', matched(LAUNCH_STYLE, release) + '\n</head>', 1)
+        for section_id, anchor in (
+            ('switching', r'<section class="section pricing" id="pricing">'),
+            ('compare', r'<section class="closing">'),
+            ('faq', r'<section class="closing">'),
+        ):
+            pattern = rf'<section id="{section_id}"[^>]*>.*?</section>'
+            if re.search(pattern, previous, re.S):
+                previous = replace(pattern, previous, release)
+            else:
+                point = matched(anchor, previous)
+                previous = previous.replace(point, matched(pattern, release) + '\n' + point, 1)
+        if re.search(LAUNCH_FOOTER, previous, re.S):
+            previous = replace(LAUNCH_FOOTER, previous, release)
+        else:
+            footer = matched(r'<footer id="site-footer">.*?</footer>', previous)
+            previous = previous.replace(footer, footer.replace('</footer>', matched(LAUNCH_FOOTER, release) + '</footer>'), 1)
     return previous
 
 
@@ -114,7 +142,8 @@ if __name__ == '__main__':
             release, public, staged_public = map(Path, sys.argv[2:])
         else:
             release, workspace, public, staged_public = map(Path, sys.argv[1:])
-        updated_public = stage_public(public.read_text(), (release / 'public/index.html').read_text())
+        updated_public = stage_public(public.read_text(), (release / 'public/index.html').read_text(),
+                                      include_launch=not public_only)
         if not public_only:
             updated_app = stage_workspace(workspace.read_text(), (release / 'app/static/index.html').read_text())
             workspace.write_text(updated_app)

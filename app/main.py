@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 
 import h11
 from fastapi import FastAPI, HTTPException, Request, Response, Depends
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import AwareDatetime, BaseModel, Field
 
 from .network_checks import (
@@ -853,6 +853,22 @@ def ready():
     except (sqlite3.Error, OSError):
         raise HTTPException(503,'Database unavailable')
     return {'ok':True, 'database':'ready'}
+
+
+@app.get('/status', response_class=HTMLResponse)
+def service_status():
+    try:
+        ready()
+    except HTTPException:
+        status_code = 503
+        status_message = 'Database readiness check failed'
+    else:
+        status_code = 200
+        status_message = 'Application and database responding'
+    template = (ROOT / 'static' / 'service-status.html').read_text(encoding='utf-8')
+    page = template.replace('__CHECK_TIME__', now()).replace('__STATUS_MESSAGE__', status_message)
+    page = page.replace('__STATUS_CLASS__', 'alert' if status_code == 503 else '')
+    return HTMLResponse(page, status_code=status_code)
 
 
 @app.get('/')
