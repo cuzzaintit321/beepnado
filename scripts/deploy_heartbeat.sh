@@ -7,8 +7,14 @@ state="$HOME/.local/state/beepnado"
 public_root="$HOME/portfolio/site/beepnado"
 public_page="$public_root/index.html"
 public_assets=(static/favicon-96.png static/guide.css static/monitor-types.css
+    static/feature-guide.css static/workspace-preview.webp
     guides/check-website-downtime/index.html
-    website-monitoring-for-agencies/index.html robots.txt sitemap.xml)
+    website-monitoring-for-agencies/index.html
+    features/page-journeys/index.html features/website-keyword-checks/index.html
+    features/json-api-checks/index.html features/ping-tcp-udp/index.html
+    features/dns-certificates-domains/index.html features/scheduled-job-heartbeats/index.html
+    features/outage-alerts/index.html features/incident-investigation/index.html
+    features/client-status-pages/index.html robots.txt sitemap.xml)
 [[ -d "$app" && -f "$public_page" ]] || { echo 'BeepNado site paths missing.' >&2; exit 1; }
 umask 077
 mkdir -p "$state"
@@ -98,7 +104,7 @@ if (( $# != 0 )); then
     exit 2
 fi
 [[ -f "$app/compose.yaml" && -f "$app/.env" ]] || { echo 'BeepNado application files missing.' >&2; exit 1; }
-public_assets+=(static/launch-proof.css static/workspace-preview.webp)
+public_assets+=(static/launch-proof.css)
 cd "$app"
 
 expect_release_file() {

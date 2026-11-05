@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Website and keyword checks | BeepNado</title>
+  <meta name="description" content="Monitor a public page for the response code, content, and speed you expect.">
+  <link rel="canonical" href="https://beepnado.com/features/website-keyword-checks/">
+  <link rel="icon" type="image/png" sizes="96x96" href="/static/favicon-96.png">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="BeepNado">
+  <meta property="og:url" content="https://beepnado.com/features/website-keyword-checks/">
+  <meta property="og:title" content="Website and keyword checks">
+  <meta property="og:description" content="Monitor a public page for the response code, content, and speed you expect.">
+  <meta name="theme-color" content="#14112b">
+  <link rel="stylesheet" href="/static/site.css">
+  <link rel="stylesheet" href="/static/experience.css?v=2">
+  <link rel="stylesheet" href="/static/guide.css">
+  <link rel="stylesheet" href="/static/feature-guide.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="nav">
+      <a class="brand" href="/" aria-label="BeepNado home">beep<span class="brand-accent">nado.</span></a>
+      <div class="nav-actions"><a class="btn btn-light" href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a></div>
+    </header>
+    <main>
+      <article class="section downtime-guide feature-guide">
+        <a class="feature-back" href="/#monitor-types">← All BeepNado features</a>
+        <p class="kicker">BEEPNADO FEATURE GUIDE</p>
+        <h1>Website and keyword checks</h1>
+        <p class="guide-lead">Monitor a public page for the response code, content, and speed you expect.</p>
+        <p>A page can return HTTP 200 while showing a maintenance notice or a placeholder. A keyword rule checks for a phrase that should appear in the page’s response. You can also set an expected status or response time limit.</p>
+
+        <figure class="feature-example">
+          <figcaption><span>EXAMPLE</span><strong>A page loads with missing content</strong></figcaption>
+          <dl>
+            <div><dt>HTTP response</dt><dd class="good">200 OK</dd></div>
+            <div><dt>Required text</dt><dd>Book a consultation</dd></div>
+            <div><dt>Text in response</dt><dd class="bad">Missing</dd></div>
+          </dl>
+        </figure>
+
+        <h2>How to use it</h2>
+        <p>Add the exact public URL you want to watch. Open its monitor rules and enter the status, required text, or response time limit that tells you the page is healthy.</p>
+        <p>Pick a phrase that stays consistent across normal updates. Check that the phrase appears in the HTTP response your server sends.</p>
+
+        <p><a class="btn btn-accent" href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a></p>
+        <h2>Related features</h2>
+        <ul>
+          <li><a href="/features/page-journeys/">Page journey monitoring</a></li>
+          <li><a href="/features/incident-investigation/">Investigate a website outage</a></li>
+        </ul>
+      </article>
+    </main>
+    <footer id="site-footer">
+      <div><a href="/"><strong>beepnado.</strong></a><span>Website uptime monitoring and status pages.</span></div>
+      <span>© 2026 BeepNado · <a href="/#pricing">Pricing</a></span>
+    </footer>
+  </div>
+</body>
+</html>

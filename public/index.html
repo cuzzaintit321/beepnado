@@ -48,33 +48,36 @@
     <p>Watch individual endpoints or check several important pages together in one monitor.</p>
   </div>
   <ul class="monitor-type-grid">
-    <li><details class="monitor-disclosure">
-      <summary><span class="monitor-disclosure-title">Page journeys</span><span class="monitor-disclosure-description">Check up to five pages in order and see which step failed, with status, timing, and error evidence.</span></summary>
-      <div class="monitor-disclosure-body">
-        <p>Check your homepage, pricing page, and contact page in one monitor. If the homepage loads but pricing returns a 500, the journey shows the pricing step as the first failure.</p>
-        <a href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a>
-      </div>
-    </details></li>
-    <li><details class="monitor-disclosure">
-      <summary><span class="monitor-disclosure-title">Website and keyword checks</span><span class="monitor-disclosure-description">Watch HTTP and HTTPS pages for unexpected status, missing text, or slow responses.</span></summary>
-      <div class="monitor-disclosure-body"><p>Require a 200 response and a phrase such as “Book a consultation.” The check can catch a placeholder or error page that still returns 200.</p></div>
-    </details></li>
-    <li><details class="monitor-disclosure">
-      <summary><span class="monitor-disclosure-title">JSON API checks</span><span class="monitor-disclosure-description">Validate that an endpoint returns JSON and an expected value.</span></summary>
-      <div class="monitor-disclosure-body"><p>Point the check at a public <code>/health</code> endpoint. Require HTTP 200 and use the JSON Pointer <code>/status</code> to verify that the value is <code>ok</code>.</p></div>
-    </details></li>
-    <li><details class="monitor-disclosure">
-      <summary><span class="monitor-disclosure-title">Ping, TCP, and UDP</span><span class="monitor-disclosure-description">Check reachability, confirm that a port accepts connections, or verify a UDP reply.</span></summary>
-      <div class="monitor-disclosure-body"><p>Use ping for an ICMP response, TCP to see whether a public port accepts a connection, or UDP to send a small request and check that the service replies.</p></div>
-    </details></li>
-    <li><details class="monitor-disclosure">
-      <summary><span class="monitor-disclosure-title">DNS, certificates, and domains</span><span class="monitor-disclosure-description">Check DNS answers and catch certificate or domain expiry before renewal is due.</span></summary>
-      <div class="monitor-disclosure-body"><p>Verify that a DNS record returns the expected answer after a migration. Set up separate checks for TLS certificate and domain registration expiry.</p></div>
-    </details></li>
-    <li><details class="monitor-disclosure">
-      <summary><span class="monitor-disclosure-title">Scheduled job heartbeats</span><span class="monitor-disclosure-description">Find out when a cron job or backup misses its expected check-in.</span></summary>
-      <div class="monitor-disclosure-body"><p>Have a nightly backup send its private heartbeat only after it succeeds. BeepNado opens an incident if no check-in arrives by the end of the grace period.</p></div>
-    </details></li>
+    <li><a class="monitor-card-link" href="/features/page-journeys/">
+      <span class="monitor-card-title">Page journeys</span>
+      <span class="monitor-card-description">Check up to five pages in order and see which step failed, with status, timing, and error evidence.</span>
+      <span class="monitor-card-more" aria-hidden="true">Explore feature →</span>
+    </a></li>
+    <li><a class="monitor-card-link" href="/features/website-keyword-checks/">
+      <span class="monitor-card-title">Website and keyword checks</span>
+      <span class="monitor-card-description">Watch HTTP and HTTPS pages for unexpected status, missing text, or slow responses.</span>
+      <span class="monitor-card-more" aria-hidden="true">Explore feature →</span>
+    </a></li>
+    <li><a class="monitor-card-link" href="/features/json-api-checks/">
+      <span class="monitor-card-title">JSON API checks</span>
+      <span class="monitor-card-description">Validate that an endpoint returns JSON and an expected value.</span>
+      <span class="monitor-card-more" aria-hidden="true">Explore feature →</span>
+    </a></li>
+    <li><a class="monitor-card-link" href="/features/ping-tcp-udp/">
+      <span class="monitor-card-title">Ping, TCP, and UDP</span>
+      <span class="monitor-card-description">Check reachability, confirm that a port accepts connections, or verify a UDP reply.</span>
+      <span class="monitor-card-more" aria-hidden="true">Explore feature →</span>
+    </a></li>
+    <li><a class="monitor-card-link" href="/features/dns-certificates-domains/">
+      <span class="monitor-card-title">DNS, certificates, and domains</span>
+      <span class="monitor-card-description">Check DNS answers and catch certificate or domain expiry before renewal is due.</span>
+      <span class="monitor-card-more" aria-hidden="true">Explore feature →</span>
+    </a></li>
+    <li><a class="monitor-card-link" href="/features/scheduled-job-heartbeats/">
+      <span class="monitor-card-title">Scheduled job heartbeats</span>
+      <span class="monitor-card-description">Find out when a cron job or backup misses its expected check-in.</span>
+      <span class="monitor-card-more" aria-hidden="true">Explore feature →</span>
+    </a></li>
   </ul>
 </section>
 <section id="switching" class="section launch-switching" aria-labelledby="switching-heading">
@@ -83,27 +86,21 @@
     <h2 id="switching-heading">Find the page that <em>needs attention.</em></h2>
   </div>
   <div class="launch-grid">
-    <article><details class="monitor-disclosure">
-      <summary><span class="monitor-disclosure-title">Get the alert</span><span class="monitor-disclosure-description">Confirmed outages show up in your workspace. Enable the browser alarm for an audible alert while the dashboard is open, or receive email at your verified address when email delivery is configured.</span></summary>
-      <div class="monitor-disclosure-body">
-        <p>In the workspace, use <strong>Test sound</strong> to hear the alarm, then select <strong>Arm alarm</strong> and leave the dashboard open.</p>
-        <a href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a>
-      </div>
-    </details></article>
-    <article><details class="monitor-disclosure">
-      <summary><span class="monitor-disclosure-title">Investigate the failure</span><span class="monitor-disclosure-description">See when an incident started and recovered, alongside the recorded HTTP status, response time, or error. A Page journey identifies the first failed step in a sequence of public pages.</span></summary>
-      <div class="monitor-disclosure-body">
-        <p>Select <strong>Investigate</strong> on the affected monitor to review recent checks and see where to start troubleshooting.</p>
-        <a href="/guides/check-website-downtime/">Read the downtime checklist ↗</a>
-      </div>
-    </details></article>
-    <article><details class="monitor-disclosure">
-      <summary><span class="monitor-disclosure-title">Keep clients informed</span><span class="monitor-disclosure-description">Publish a status page with the monitors a client needs to see. Build a 7- or 30-day report from those same monitors.</span></summary>
-      <div class="monitor-disclosure-body">
-        <p>In <strong>Client pages</strong>, choose which monitors to share and publish the read-only status link. Generate a report from the same page.</p>
-        <a href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a>
-      </div>
-    </details></article>
+    <article><a class="monitor-card-link" href="/features/outage-alerts/">
+      <span class="monitor-card-title">Get the alert</span>
+      <span class="monitor-card-description">Confirmed outages show up in your workspace. Enable the browser alarm for an audible alert while the dashboard is open, or receive email at your verified address when email delivery is configured.</span>
+      <span class="monitor-card-more" aria-hidden="true">Explore feature →</span>
+    </a></article>
+    <article><a class="monitor-card-link" href="/features/incident-investigation/">
+      <span class="monitor-card-title">Investigate the failure</span>
+      <span class="monitor-card-description">See when an incident started and recovered, alongside the recorded HTTP status, response time, or error. A Page journey identifies the first failed step in a sequence of public pages.</span>
+      <span class="monitor-card-more" aria-hidden="true">Explore feature →</span>
+    </a></article>
+    <article><a class="monitor-card-link" href="/features/client-status-pages/">
+      <span class="monitor-card-title">Keep clients informed</span>
+      <span class="monitor-card-description">Publish a status page with the monitors a client needs to see. Build a 7- or 30-day report from those same monitors.</span>
+      <span class="monitor-card-more" aria-hidden="true">Explore feature →</span>
+    </a></article>
   </div>
   <div class="launch-agency">
     <p><strong>Built by an agency that uses it.</strong> Reboot Syndicate built BeepNado to monitor the sites we run. The same workspace helps you find the failure, investigate it, and explain it to the people waiting for an update.</p>

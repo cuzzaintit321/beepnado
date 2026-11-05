@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Page journey monitoring | BeepNado</title>
+  <meta name="description" content="Check the pages customers depend on in order and see exactly which step stopped the journey.">
+  <link rel="canonical" href="https://beepnado.com/features/page-journeys/">
+  <link rel="icon" type="image/png" sizes="96x96" href="/static/favicon-96.png">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="BeepNado">
+  <meta property="og:url" content="https://beepnado.com/features/page-journeys/">
+  <meta property="og:title" content="Page journey monitoring">
+  <meta property="og:description" content="Check the pages customers depend on in order and see exactly which step stopped the journey.">
+  <meta name="theme-color" content="#14112b">
+  <link rel="stylesheet" href="/static/site.css">
+  <link rel="stylesheet" href="/static/experience.css?v=2">
+  <link rel="stylesheet" href="/static/guide.css">
+  <link rel="stylesheet" href="/static/feature-guide.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="nav">
+      <a class="brand" href="/" aria-label="BeepNado home">beep<span class="brand-accent">nado.</span></a>
+      <div class="nav-actions"><a class="btn btn-light" href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a></div>
+    </header>
+    <main>
+      <article class="section downtime-guide feature-guide">
+        <a class="feature-back" href="/#monitor-types">← All BeepNado features</a>
+        <p class="kicker">BEEPNADO FEATURE GUIDE</p>
+        <h1>Page journey monitoring</h1>
+        <p class="guide-lead">Check the pages customers depend on in order and see exactly which step stopped the journey.</p>
+        <p>A visitor can load your homepage while your pricing page is failing. A journey checks two to five public URLs on the same site as one monitor. Each step can require an HTTP status and a phrase in the response.</p>
+
+        <figure class="feature-example">
+          <figcaption><span>EXAMPLE</span><strong>A three-page journey</strong></figcaption>
+          <dl>
+            <div><dt>01  Homepage</dt><dd class="good">HTTP 200</dd></div>
+            <div><dt>02  Pricing</dt><dd class="bad">HTTP 500</dd></div>
+            <div><dt>03  Contact</dt><dd>Skipped</dd></div>
+          </dl>
+        </figure>
+
+        <h2>How to use it</h2>
+        <p>In Monitors, choose Page journey. Enter your site’s public origin, then add each path and the response you expect.</p>
+        <p>In this example, BeepNado stops at Pricing. Open Investigate to see the status and timing of the steps it tried. Journeys make HTTP GET requests and check the responses.</p>
+
+        <p><a class="btn btn-accent" href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a></p>
+        <h2>Related features</h2>
+        <ul>
+          <li><a href="/features/website-keyword-checks/">Website and keyword checks</a></li>
+          <li><a href="/features/incident-investigation/">Investigate a website outage</a></li>
+        </ul>
+      </article>
+    </main>
+    <footer id="site-footer">
+      <div><a href="/"><strong>beepnado.</strong></a><span>Website uptime monitoring and status pages.</span></div>
+      <span>© 2026 BeepNado · <a href="/#pricing">Pricing</a></span>
+    </footer>
+  </div>
+</body>
+</html>

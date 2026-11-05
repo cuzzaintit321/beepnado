@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Ping, TCP, and UDP monitoring | BeepNado</title>
+  <meta name="description" content="Choose a check that matches how your public host or service communicates.">
+  <link rel="canonical" href="https://beepnado.com/features/ping-tcp-udp/">
+  <link rel="icon" type="image/png" sizes="96x96" href="/static/favicon-96.png">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="BeepNado">
+  <meta property="og:url" content="https://beepnado.com/features/ping-tcp-udp/">
+  <meta property="og:title" content="Ping, TCP, and UDP monitoring">
+  <meta property="og:description" content="Choose a check that matches how your public host or service communicates.">
+  <meta name="theme-color" content="#14112b">
+  <link rel="stylesheet" href="/static/site.css">
+  <link rel="stylesheet" href="/static/experience.css?v=2">
+  <link rel="stylesheet" href="/static/guide.css">
+  <link rel="stylesheet" href="/static/feature-guide.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="nav">
+      <a class="brand" href="/" aria-label="BeepNado home">beep<span class="brand-accent">nado.</span></a>
+      <div class="nav-actions"><a class="btn btn-light" href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a></div>
+    </header>
+    <main>
+      <article class="section downtime-guide feature-guide">
+        <a class="feature-back" href="/#monitor-types">← All BeepNado features</a>
+        <p class="kicker">BEEPNADO FEATURE GUIDE</p>
+        <h1>Ping, TCP, and UDP monitoring</h1>
+        <p class="guide-lead">Choose a check that matches how your public host or service communicates.</p>
+        <p>An ICMP ping checks for an echo response. A TCP check tries to connect to a specific port. A UDP check sends a short request and expects a reply, with an optional matching prefix.</p>
+
+        <figure class="feature-example">
+          <figcaption><span>EXAMPLE</span><strong>Three signals from a public host</strong></figcaption>
+          <dl>
+            <div><dt>ICMP ping</dt><dd class="good">Echo received</dd></div>
+            <div><dt>TCP port 443</dt><dd class="bad">Connection refused</dd></div>
+            <div><dt>UDP reply</dt><dd class="good">Response received</dd></div>
+          </dl>
+        </figure>
+
+        <h2>How to use it</h2>
+        <p>Choose ICMP ping, TCP port, or UDP reply when adding a monitor. For a port check, enter the service’s public port. For UDP, supply the short request the service expects.</p>
+        <p>If a host answers ping and refuses TCP on port 443, investigate the listener, firewall, or proxy that serves HTTPS on that port.</p>
+
+        <p><a class="btn btn-accent" href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a></p>
+        <h2>Related features</h2>
+        <ul>
+          <li><a href="/features/json-api-checks/">JSON API monitoring</a></li>
+          <li><a href="/features/dns-certificates-domains/">DNS, certificate, and domain monitoring</a></li>
+        </ul>
+      </article>
+    </main>
+    <footer id="site-footer">
+      <div><a href="/"><strong>beepnado.</strong></a><span>Website uptime monitoring and status pages.</span></div>
+      <span>© 2026 BeepNado · <a href="/#pricing">Pricing</a></span>
+    </footer>
+  </div>
+</body>
+</html>

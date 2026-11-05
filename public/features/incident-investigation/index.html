@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Investigate a website outage | BeepNado</title>
+  <meta name="description" content="Review the exact check that failed and use the recorded evidence to decide what to inspect first.">
+  <link rel="canonical" href="https://beepnado.com/features/incident-investigation/">
+  <link rel="icon" type="image/png" sizes="96x96" href="/static/favicon-96.png">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="BeepNado">
+  <meta property="og:url" content="https://beepnado.com/features/incident-investigation/">
+  <meta property="og:title" content="Investigate a website outage">
+  <meta property="og:description" content="Review the exact check that failed and use the recorded evidence to decide what to inspect first.">
+  <meta name="theme-color" content="#14112b">
+  <link rel="stylesheet" href="/static/site.css">
+  <link rel="stylesheet" href="/static/experience.css?v=2">
+  <link rel="stylesheet" href="/static/guide.css">
+  <link rel="stylesheet" href="/static/feature-guide.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="nav">
+      <a class="brand" href="/" aria-label="BeepNado home">beep<span class="brand-accent">nado.</span></a>
+      <div class="nav-actions"><a class="btn btn-light" href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a></div>
+    </header>
+    <main>
+      <article class="section downtime-guide feature-guide">
+        <a class="feature-back" href="/#switching">← All BeepNado features</a>
+        <p class="kicker">BEEPNADO FEATURE GUIDE</p>
+        <h1>Investigate a website outage</h1>
+        <p class="guide-lead">Review the exact check that failed and use the recorded evidence to decide what to inspect first.</p>
+        <p>Open a monitor’s investigation view to see its latest check and recent history. BeepNado groups recorded evidence such as DNS errors, TLS errors, timeouts, and HTTP failures. A page journey also shows the steps it attempted.</p>
+
+        <figure class="feature-example">
+          <figcaption><span>EXAMPLE</span><strong>Evidence from a failed pricing page</strong></figcaption>
+          <dl>
+            <div><dt>Affected path</dt><dd>/pricing</dd></div>
+            <div><dt>Observed response</dt><dd class="bad">HTTP 502</dd></div>
+            <div><dt>Time of check</dt><dd>10:42 a.m.</dd></div>
+            <div><dt>First place to look</dt><dd>Proxy and upstream logs</dd></div>
+          </dl>
+        </figure>
+
+        <h2>How to use it</h2>
+        <p>Select <strong>Investigate</strong> on the monitor. Capture the URL, timestamp, and error. Then test the same URL from a separate network and compare the result.</p>
+        <p>An HTTP 502 is evidence that helps you narrow down the investigation. Check the proxy and upstream logs at the recorded time. Use the <a href="/guides/check-website-downtime/">downtime checklist</a> to work through the next steps.</p>
+
+        <figure class="feature-screenshot">
+          <img src="/static/workspace-preview.webp" width="1440" height="900" loading="lazy"
+               alt="BeepNado workspace showing monitored websites, check results, and response times">
+          <figcaption>BeepNado’s workspace with a demo account and real checks.</figcaption>
+        </figure>
+
+        <p><a class="btn btn-accent" href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a></p>
+        <h2>Related features</h2>
+        <ul>
+          <li><a href="/features/page-journeys/">Page journey monitoring</a></li>
+          <li><a href="/features/client-status-pages/">Client status pages and reports</a></li>
+        </ul>
+      </article>
+    </main>
+    <footer id="site-footer">
+      <div><a href="/"><strong>beepnado.</strong></a><span>Website uptime monitoring and status pages.</span></div>
+      <span>© 2026 BeepNado · <a href="/#pricing">Pricing</a></span>
+    </footer>
+  </div>
+</body>
+</html>

@@ -1,0 +1,54 @@
+.feature-guide .feature-back {
+  display: inline-block;
+  margin-bottom: 1.75rem;
+  color: #574478;
+  font-weight: 650;
+}
+
+.feature-example {
+  margin: 2rem 0;
+  border: 1px solid #493853;
+  border-radius: 1.15rem;
+  overflow: hidden;
+  background: #211a2f;
+  color: #f8f2fb;
+}
+
+.feature-example figcaption {
+  display: grid;
+  gap: .2rem;
+  padding: 1rem 1.25rem;
+  background: #30243e;
+}
+
+.feature-example figcaption span {
+  color: #ffc392;
+  font-size: .75rem;
+  font-weight: 750;
+  letter-spacing: .13em;
+}
+
+.feature-example figcaption strong { font-size: 1.15rem; }
+.feature-example dl { margin: 0; padding: 0 1.25rem; }
+
+.feature-example dl div {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: .5rem 1rem;
+  padding: .7rem 0;
+}
+
+.feature-example dl div + div { border-top: 1px solid #4a3e57; }
+.feature-example dd { margin: 0; overflow-wrap: anywhere; }
+.feature-example .good { color: #91e2bc; }
+.feature-example .bad { color: #ffacb4; }
+.feature-example .warn { color: #ffcf92; }
+
+.feature-screenshot { margin: 1.5rem 0; }
+.feature-screenshot img { display: block; width: 100%; height: auto; border-radius: .8rem; }
+.feature-screenshot figcaption { margin-top: .5rem; color: #574c63; font-size: .9rem; }
+
+@media (max-width: 440px) {
+  .feature-example dl div { grid-template-columns: 1fr; gap: .1rem; }
+  .feature-example dd { font-size: .95rem; }
+}

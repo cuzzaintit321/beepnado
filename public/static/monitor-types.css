@@ -4,22 +4,13 @@
 .monitor-type-grid li:first-child{border-color:#e9ad9d;background:#fff5ef}
 
 .monitor-type-grid li,.launch-grid article{display:flex}
-.monitor-disclosure{display:flex;flex-direction:column;flex:1;min-width:0;border-radius:inherit}
-.monitor-disclosure > summary{
-  position:relative;display:block;box-sizing:border-box;padding:1.25rem 1.4rem;
-  border-radius:inherit;list-style:none;cursor:pointer;
+.monitor-card-link{
+  display:flex;flex:1;min-width:0;flex-direction:column;align-items:flex-start;
+  padding:1.25rem 1.4rem;border-radius:inherit;text-decoration:none;
 }
-.monitor-disclosure:not([open]) > summary{flex:1}
-.monitor-disclosure > summary::-webkit-details-marker{display:none}
-.monitor-disclosure > summary::after{
-  content:"";position:absolute;top:1.42rem;right:1.45rem;width:.46rem;height:.46rem;
-  border:solid #89503f;border-width:0 2px 2px 0;transform:rotate(45deg);
-}
-.monitor-disclosure[open] > summary::after{transform:rotate(225deg)}
-.monitor-disclosure > summary:hover{background:#7951680d}
-.monitor-disclosure > summary:focus-visible{outline:2px solid #89503f;outline-offset:2px}
-.monitor-disclosure-title{display:block;margin:0 1.1rem .4rem 0;color:#25203c;font-size:1.05rem;font-weight:700}
-.monitor-disclosure-description,.monitor-disclosure-body{display:block;color:#4b465c;line-height:1.6}
-.monitor-disclosure-body{margin:0 1.4rem;padding:.9rem 0 1.25rem;border-top:1px solid #e4dae9}
-.monitor-disclosure-body p{margin:0}
-.monitor-disclosure-body a{display:inline-block;margin-top:.55rem;color:#574478;text-decoration:underline;text-underline-offset:.15em}
+.monitor-card-link:hover{background:#7951680d}
+.monitor-card-link:focus-visible{outline:2px solid #89503f;outline-offset:2px}
+.monitor-card-title{margin-bottom:.4rem;color:#25203c;font-size:1.05rem;font-weight:700}
+.monitor-card-description{color:#4b465c;line-height:1.6}
+.monitor-card-more{margin-top:auto;padding-top:.85rem;color:#72432d;font-size:.86rem;font-weight:700}
+.monitor-card-link:hover .monitor-card-more,.monitor-card-link:focus-visible .monitor-card-more{text-decoration:underline}

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Scheduled job heartbeat monitoring | BeepNado</title>
+  <meta name="description" content="Find out when a backup or scheduled job misses its expected check-in.">
+  <link rel="canonical" href="https://beepnado.com/features/scheduled-job-heartbeats/">
+  <link rel="icon" type="image/png" sizes="96x96" href="/static/favicon-96.png">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="BeepNado">
+  <meta property="og:url" content="https://beepnado.com/features/scheduled-job-heartbeats/">
+  <meta property="og:title" content="Scheduled job heartbeat monitoring">
+  <meta property="og:description" content="Find out when a backup or scheduled job misses its expected check-in.">
+  <meta name="theme-color" content="#14112b">
+  <link rel="stylesheet" href="/static/site.css">
+  <link rel="stylesheet" href="/static/experience.css?v=2">
+  <link rel="stylesheet" href="/static/guide.css">
+  <link rel="stylesheet" href="/static/feature-guide.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="nav">
+      <a class="brand" href="/" aria-label="BeepNado home">beep<span class="brand-accent">nado.</span></a>
+      <div class="nav-actions"><a class="btn btn-light" href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a></div>
+    </header>
+    <main>
+      <article class="section downtime-guide feature-guide">
+        <a class="feature-back" href="/#monitor-types">← All BeepNado features</a>
+        <p class="kicker">BEEPNADO FEATURE GUIDE</p>
+        <h1>Scheduled job heartbeat monitoring</h1>
+        <p class="guide-lead">Find out when a backup or scheduled job misses its expected check-in.</p>
+        <p>A heartbeat monitor waits for your job to send a private check-in after a successful run. If the expected interval and grace period elapse without a check-in, BeepNado opens an incident.</p>
+
+        <figure class="feature-example">
+          <figcaption><span>EXAMPLE</span><strong>A nightly backup misses a run</strong></figcaption>
+          <dl>
+            <div><dt>Expected interval</dt><dd>24 hours</dd></div>
+            <div><dt>Grace period</dt><dd>30 minutes</dd></div>
+            <div><dt>Check-in by deadline</dt><dd class="bad">Missing</dd></div>
+            <div><dt>Next successful check-in</dt><dd class="good">Recovery</dd></div>
+          </dl>
+        </figure>
+
+        <h2>How to use it</h2>
+        <p>Choose Heartbeat in Monitors and set the interval and grace period. Copy the private check-in command and have your scheduler run it only after the job succeeds.</p>
+        <p>For a backup that normally runs once a day, allow enough grace for occasional delays. The next valid check-in resolves an open heartbeat incident.</p>
+
+        <p><a class="btn btn-accent" href="https://app.beepnado.com/?start=1">Open BeepNado ↗</a></p>
+        <h2>Related features</h2>
+        <ul>
+          <li><a href="/features/outage-alerts/">Website outage alerts</a></li>
+          <li><a href="/features/incident-investigation/">Investigate a website outage</a></li>
+        </ul>
+      </article>
+    </main>
+    <footer id="site-footer">
+      <div><a href="/"><strong>beepnado.</strong></a><span>Website uptime monitoring and status pages.</span></div>
+      <span>© 2026 BeepNado · <a href="/#pricing">Pricing</a></span>
+    </footer>
+  </div>
+</body>
+</html>
