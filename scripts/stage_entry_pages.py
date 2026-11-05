@@ -13,7 +13,7 @@ PUBLIC_HEAD_TAGS = (
     *(rf'<meta property="og:{field}"[^>]+>' for field in ('type', 'site_name', 'url', 'title', 'description')),
     r'<script id="beepnado-website-schema"[^>]*>.*?</script>',
 )
-GUIDE_LINK = r'<a href="/guides/check-website-downtime/">[^<]+</a>'
+GUIDE_LINK = r'<a href="/guides/check-website-downtime/">[^<]+</a>(?= · |</span></footer>)'
 AGENCY_LINK = r'<a href="/website-monitoring-for-agencies/">[^<]+</a>'
 MONITOR_TYPES = r'<section id="monitor-types"[^>]*>.*?</section>'
 MONITOR_TYPES_STYLE = r'<link rel="stylesheet" href="/static/monitor-types\.css">'
@@ -26,6 +26,7 @@ NAV_ACTIONS = r'<div class="nav-actions">.*?</div>'
 PRICING = r'<section class="section pricing" id="pricing">.*?</section>'
 LAUNCH_STYLE = r'<link rel="stylesheet" href="/static/launch-proof\.css">'
 LAUNCH_FOOTER = r'<span data-launch-links>.*?</span>'
+SWITCHING = r'<section id="switching"[^>]*>.*?</section>'
 APP_BACK = r'<button\b[^>]*\bid="account-back"[^>]*>.*?</button>'
 
 
@@ -78,11 +79,10 @@ def stage_public(previous, release, *, include_launch=True):
             previous = replace(pattern, previous, release)
         if not re.search(LAUNCH_STYLE, previous):
             previous = previous.replace('</head>', matched(LAUNCH_STYLE, release) + '\n</head>', 1)
-        for section_id, anchor in (
-            ('switching', r'<section class="section pricing" id="pricing">'),
-            ('faq', r'<section class="closing">'),
+        for pattern, anchor in (
+            (SWITCHING, r'<section class="section pricing" id="pricing">'),
+            (r'<section id="faq"[^>]*>.*?</section>', r'<section class="closing">'),
         ):
-            pattern = rf'<section id="{section_id}"[^>]*>.*?</section>'
             if re.search(pattern, previous, re.S):
                 previous = replace(pattern, previous, release)
             else:
@@ -93,6 +93,8 @@ def stage_public(previous, release, *, include_launch=True):
         else:
             footer = matched(r'<footer id="site-footer">.*?</footer>', previous)
             previous = previous.replace(footer, footer.replace('</footer>', matched(LAUNCH_FOOTER, release) + '</footer>'), 1)
+    elif re.search(SWITCHING, previous, re.S):
+        previous = replace(SWITCHING, previous, release)
     return previous
 
 

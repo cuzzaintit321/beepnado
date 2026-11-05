@@ -4,9 +4,9 @@
 .launch-status-link{display:inline-block;margin-top:.75rem;color:#ffcc8d;text-underline-offset:.18em}
 .launch-switching,.launch-faq{padding-block:clamp(2.5rem,6vw,5rem)}
 .launch-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,17rem),1fr));gap:1rem;max-width:72rem;margin:2rem auto 0}
-.launch-grid article,.launch-agency,.launch-faq details{border:1px solid #e4dae9;border-radius:1rem;background:#fff;padding:1.3rem}
-.launch-grid h3{margin:0 0 .55rem;color:#29213e;font-size:1.05rem}
-.launch-grid p,.launch-agency p,.launch-faq p{margin:0;color:#51485d;line-height:1.65}
+.launch-grid article,.launch-agency,.launch-faq details{border:1px solid #e4dae9;border-radius:1rem;background:#fff}
+.launch-agency,.launch-faq details{padding:1.3rem}
+.launch-agency p,.launch-faq p{margin:0;color:#51485d;line-height:1.65}
 .launch-agency{max-width:72rem;margin:1rem auto 0;background:#fff3e7}
 .launch-agency a{color:#574478;text-underline-offset:.15em}
 .launch-faq details{max-width:52rem;margin:.7rem auto}
