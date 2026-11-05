@@ -69,17 +69,15 @@ def stage_public(previous, release, *, include_launch=True):
             previous = replace(pattern, previous, release)
         if not re.search(LAUNCH_STYLE, previous):
             previous = previous.replace('</head>', matched(LAUNCH_STYLE, release) + '\n</head>', 1)
-        for pattern, anchor in (
-            (SWITCHING, r'<section class="section pricing" id="pricing">'),
-            (r'<section id="faq"[^>]*>.*?</section>', r'<section class="closing">'),
-        ):
-            if re.search(pattern, previous, re.S):
-                previous = replace(pattern, previous, release)
-            else:
-                point = matched(anchor, previous)
-                previous = previous.replace(point, matched(pattern, release) + '\n' + point, 1)
-    elif re.search(SWITCHING, previous, re.S):
-        previous = replace(SWITCHING, previous, release)
+    for pattern, anchor in (
+        (SWITCHING, r'<section class="section pricing" id="pricing">'),
+        (r'<section id="faq"[^>]*>.*?</section>', r'<section class="closing">'),
+    ):
+        if re.search(pattern, previous, re.S):
+            previous = replace(pattern, previous, release)
+        elif include_launch:
+            point = matched(anchor, previous)
+            previous = previous.replace(point, matched(pattern, release) + '\n' + point, 1)
     return previous
 
 
