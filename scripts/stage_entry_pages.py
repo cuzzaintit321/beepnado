@@ -16,7 +16,7 @@ PUBLIC_HEAD_TAGS = (
 GUIDE_LINK = r'<a href="/guides/check-website-downtime/">[^<]+</a>(?= · |</span></footer>)'
 AGENCY_LINK = r'<a href="/website-monitoring-for-agencies/">[^<]+</a>'
 MONITOR_TYPES = r'<section id="monitor-types"[^>]*>.*?</section>'
-MONITOR_TYPES_STYLE = r'<link rel="stylesheet" href="/static/monitor-types\.css">'
+MONITOR_TYPES_STYLE = r'<link rel="stylesheet" href="/static/monitor-types\.css(?:\?[^"]*)?">'
 FOOTER_CREDIT = r'<span data-reboot-credit>[^<]*<a[^>]+>[^<]+</a>[^<]*</span>'
 ENTRY = r'<p id="app-loading".*?(?=<section id="account-screen")'
 OLD_APP_MARKETING = r'<header class="nav">.*?</main>\s*(?=<section id="account-screen")'
@@ -52,7 +52,9 @@ def stage_public(previous, release, *, include_launch=True):
             updated = replace(pattern, updated, release)
         else:
             updated = updated.replace('</head>', '\n' + matched(pattern, release) + '\n</head>', 1)
-    if not re.search(MONITOR_TYPES_STYLE, updated):
+    if re.search(MONITOR_TYPES_STYLE, updated):
+        updated = replace(MONITOR_TYPES_STYLE, updated, release)
+    else:
         updated = updated.replace('</head>', matched(MONITOR_TYPES_STYLE, release) + '\n</head>', 1)
     previous = previous.replace(head, updated, 1)
     if re.search(MONITOR_TYPES, previous, re.S):

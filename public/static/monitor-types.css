@@ -1,7 +1,6 @@
 .monitor-types{padding-block:clamp(3rem,7vw,6rem)}
 .monitor-type-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,16rem),1fr));gap:1rem;max-width:72rem;margin:2rem auto 0;padding:0;list-style:none}
-.monitor-type-grid li{background:#fff;border:1px solid #ebe2ed;border-radius:1rem}
-.monitor-type-grid li:first-child{border-color:#e9ad9d;background:#fff5ef}
+.monitor-type-grid li{background:#fff;border:1px solid #e4dae9;border-radius:1rem}
 
 .monitor-type-grid li,.launch-grid article{display:flex}
 .monitor-card-link{
