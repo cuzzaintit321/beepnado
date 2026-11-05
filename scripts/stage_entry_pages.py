@@ -13,11 +13,9 @@ PUBLIC_HEAD_TAGS = (
     *(rf'<meta property="og:{field}"[^>]+>' for field in ('type', 'site_name', 'url', 'title', 'description')),
     r'<script id="beepnado-website-schema"[^>]*>.*?</script>',
 )
-GUIDE_LINK = r'<a href="/guides/check-website-downtime/">[^<]+</a>(?= · |</span></footer>)'
-AGENCY_LINK = r'<a href="/website-monitoring-for-agencies/">[^<]+</a>'
 MONITOR_TYPES = r'<section id="monitor-types"[^>]*>.*?</section>'
 MONITOR_TYPES_STYLE = r'<link rel="stylesheet" href="/static/monitor-types\.css(?:\?[^"]*)?">'
-FOOTER_CREDIT = r'<span data-reboot-credit>[^<]*<a[^>]+>[^<]+</a>[^<]*</span>'
+FOOTER = r'<footer id="site-footer">.*?</footer>'
 ENTRY = r'<p id="app-loading".*?(?=<section id="account-screen")'
 OLD_APP_MARKETING = r'<header class="nav">.*?</main>\s*(?=<section id="account-screen")'
 HERO_PREVIEW = HERO_VISUAL + r'.*?(?=</section>)'
@@ -43,7 +41,6 @@ def replace(pattern, previous, release):
 
 def stage_public(previous, release, *, include_launch=True):
     previous = re.sub(r'<section id="compare"[^>]*>.*?</section>\n?', '', previous, flags=re.S)
-    previous = previous.replace('<a href="#compare">Compare</a> · ', '')
     previous = replace(HERO, previous, release)
     head = matched(r'<head>.*?</head>', previous)
     updated = head
@@ -62,20 +59,11 @@ def stage_public(previous, release, *, include_launch=True):
     else:
         pricing = matched(r'<section class="section pricing" id="pricing">', previous)
         previous = previous.replace(pricing, matched(MONITOR_TYPES, release) + '\n' + pricing, 1)
-    if not re.search(GUIDE_LINK, previous):
-        pricing_link = matched(r'<a href="#pricing">Pricing</a>(?=</span></footer>)', previous)
-        previous = previous.replace(pricing_link + '</span></footer>',
-                                    pricing_link + ' · ' + matched(GUIDE_LINK, release) + '</span></footer>', 1)
-    if not re.search(AGENCY_LINK, previous):
-        guide_link = matched(GUIDE_LINK + r'(?=</span></footer>)', previous)
-        previous = previous.replace(guide_link + '</span></footer>',
-                                    guide_link + ' · ' + matched(AGENCY_LINK, release) + '</span></footer>', 1)
-    if not re.search(FOOTER_CREDIT, previous):
-        footer = matched(r'<footer id="site-footer">.*?</footer>', previous)
-        old_credit = '<span>Your websites. Our radar.</span>'
-        if old_credit in footer:
-            updated_footer = footer.replace(old_credit, matched(FOOTER_CREDIT, release), 1)
-            previous = previous.replace(footer, updated_footer, 1)
+    footer = matched(FOOTER, previous)
+    updated_footer = matched(FOOTER, release)
+    if not include_launch and not re.search(LAUNCH_FOOTER, footer, re.S):
+        updated_footer = re.sub(LAUNCH_FOOTER, '', updated_footer, flags=re.S)
+    previous = previous.replace(footer, updated_footer, 1)
     if include_launch:
         for pattern in (HERO_PREVIEW, NAV_MENU, NAV_ACTIONS, PRICING):
             previous = replace(pattern, previous, release)
@@ -90,11 +78,6 @@ def stage_public(previous, release, *, include_launch=True):
             else:
                 point = matched(anchor, previous)
                 previous = previous.replace(point, matched(pattern, release) + '\n' + point, 1)
-        if re.search(LAUNCH_FOOTER, previous, re.S):
-            previous = replace(LAUNCH_FOOTER, previous, release)
-        else:
-            footer = matched(r'<footer id="site-footer">.*?</footer>', previous)
-            previous = previous.replace(footer, footer.replace('</footer>', matched(LAUNCH_FOOTER, release) + '</footer>'), 1)
     elif re.search(SWITCHING, previous, re.S):
         previous = replace(SWITCHING, previous, release)
     return previous
@@ -112,7 +95,7 @@ def stage_workspace(previous, release):
         link = matched(r'<a class="go-back"[^>]*>[^<]+</a>', release)
         previous = previous.replace(matched(APP_BACK, previous), link, 1)
     previous = re.sub(r'<meta property="og:[^>]+>\n?', '', previous)
-    previous = re.sub(r'<footer id="site-footer">.*?</footer>\n?', '', previous, flags=re.S)
+    previous = re.sub(FOOTER + r'\n?', '', previous, flags=re.S)
     for pattern in (r'<link rel="stylesheet" href="/static/monitor-theme\.css(?:\?[^"]*)?">',
                     r'<script src="/static/app\.js(?:\?[^"]*)?" defer></script>',
                     r'<script src="/static/monitor-view\.js(?:\?[^"]*)?" defer></script>'):
