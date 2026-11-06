@@ -119,7 +119,7 @@ expect_release_file() {
     return 1
 }
 
-expect_release_file app/main.py acf40c7df3534c0a72d1e81fbf677e167258a81f72c53027a5a1169e7812cf95 7d1ad4840f081ebddf538c60f0b3b3ff55e2ce232e099b4d24baf906d1bbcbc2 b444cf0943d58e464518daf20248614237c0cd5d86d3f19ad151b43607a698c1 1556f3cdee407dee2ce939a4c081a972ca5b042f2fce5ec8888e4f8c3a1c52d9 463d79e4917dab6a5874dc9a56081a997186bf3a486204f8a73475047bd62c3c 0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1 b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e 8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676 eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370 6eed33a5ba88ed3f848c3766df539ffe6fabd3e3bbd2c7087b28026d78e36ed5 7deb7b032a1862afd200f69328ea204ebca3bea323861f3f0829fb02f8c9f62b
+expect_release_file app/main.py 35a939b7dc62f50b6d8def2273725eb4d87645b4b4a1b27516a0badba43211df acf40c7df3534c0a72d1e81fbf677e167258a81f72c53027a5a1169e7812cf95 7d1ad4840f081ebddf538c60f0b3b3ff55e2ce232e099b4d24baf906d1bbcbc2 b444cf0943d58e464518daf20248614237c0cd5d86d3f19ad151b43607a698c1 1556f3cdee407dee2ce939a4c081a972ca5b042f2fce5ec8888e4f8c3a1c52d9 463d79e4917dab6a5874dc9a56081a997186bf3a486204f8a73475047bd62c3c 0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1 b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e 8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676 eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370 6eed33a5ba88ed3f848c3766df539ffe6fabd3e3bbd2c7087b28026d78e36ed5 7deb7b032a1862afd200f69328ea204ebca3bea323861f3f0829fb02f8c9f62b
 expect_release_file app/static/monitor-view.js 539c2135c6f821169bf5fccdf42a160cbdcf2b2830b414b8b521c1815dc1c1a5 d426c4763c335060b9594c10e9dcc67c820ff47c87d6614f09888f804f33026a d7569b521cb79c9bea42afdfb0f043c97b8f0fdcdda7f76c53e65a8518af72b6 a2997738a91b875bccf9709ff7638e5ed510b9947bbc44a3f4aebd4e5a65deae 4a165fd2c214fa63496f7fa6721b5bd1a00ccb65de529c50d234ea23f5e8f00e 4fcefd3fddef0046279c0733450466b0377f5553d679eb9d9f57c5c7b588014f 97deadce2c8cb6be49432d8f77d803b9ba98a7b1736e99505c28b8ac0818c5f5 b3a34f0bc39bae085f292d87f347efa25967bd13ff6804302668672e04496e30
 expect_release_file requirements.txt c7b3d34378d337125cc58d87dd542b70322cffac63339196e5c23cdfeb9c9cef ab59b5f98e5e75669346e0f877691470741461658fdaee164162ac885ebc8be4
 
@@ -127,7 +127,7 @@ staged_main="$state/release/app/main.py"
 if [[ -f "$staged_main" ]] && ! cmp -s "$staged_main" "$release/app/main.py"; then
     read -r staged_digest _ < <(sha256sum -- "$staged_main")
     case "$staged_digest" in
-        acf40c7df3534c0a72d1e81fbf677e167258a81f72c53027a5a1169e7812cf95|7d1ad4840f081ebddf538c60f0b3b3ff55e2ce232e099b4d24baf906d1bbcbc2|b444cf0943d58e464518daf20248614237c0cd5d86d3f19ad151b43607a698c1|1556f3cdee407dee2ce939a4c081a972ca5b042f2fce5ec8888e4f8c3a1c52d9|0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1|b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e|8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676|eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370|6eed33a5ba88ed3f848c3766df539ffe6fabd3e3bbd2c7087b28026d78e36ed5|7deb7b032a1862afd200f69328ea204ebca3bea323861f3f0829fb02f8c9f62b) ;;
+        35a939b7dc62f50b6d8def2273725eb4d87645b4b4a1b27516a0badba43211df|acf40c7df3534c0a72d1e81fbf677e167258a81f72c53027a5a1169e7812cf95|7d1ad4840f081ebddf538c60f0b3b3ff55e2ce232e099b4d24baf906d1bbcbc2|b444cf0943d58e464518daf20248614237c0cd5d86d3f19ad151b43607a698c1|1556f3cdee407dee2ce939a4c081a972ca5b042f2fce5ec8888e4f8c3a1c52d9|0e73bcd368b147c4016f19ae3a50eb0ee9b147b0cc8e6d11a13c824ca2d835b1|b0c407c8ec8c0687f55c8e3c1062d47fee53518017ca55884d4ae31c5e6b551e|8f96fdf69ddc440bcb0b716fc6a0e3533ff97813a4c2405c2693303440b29676|eee66058746487fb8cff8e507966bf0ce0a080c84eca239aba3648024ee5e370|6eed33a5ba88ed3f848c3766df539ffe6fabd3e3bbd2c7087b28026d78e36ed5|7deb7b032a1862afd200f69328ea204ebca3bea323861f3f0829fb02f8c9f62b) ;;
         *) echo 'Existing paid release was modified. Review before updating.' >&2; exit 1 ;;
     esac
 fi
@@ -189,23 +189,24 @@ PUBLIC_STATUS_PATCH
 ui="$backup/ui"
 mkdir -p "$ui"
 cp -p --parents -- app/static/app.js app/static/index.html "$ui"
-# Stage the two narrow runtime changes against the installed files.
-python3 - "$backup" <<'PING_RUNTIME'
+# Stage the runtime and billing updates against the installed files.
+python3 - "$backup" <<'STAGE_RUNTIME'
 from pathlib import Path
 import sys
 root = Path(sys.argv[1])
 edits = {
     'compose.yaml': ('    cap_drop: [ALL]', '    cap_drop: [ALL]\n    sysctls:\n      net.ipv4.ping_group_range: "10002 10002"'),
     'Dockerfile': ('&& useradd -u 10002 -m', '&& groupadd -g 10002 beepnado && useradd -u 10002 -g 10002 -m'),
+    'app/static/app.js': ('100 monitors / 1-minute checks', '100 monitors / 30-second checks'),
 }
 for filename, (old, new) in edits.items():
     source = (root / filename).read_text()
     if new not in source:
         if source.count(old) != 1 or (filename == 'compose.yaml' and 'sysctls:' in source):
-            raise SystemExit(f'Review local {filename} before enabling ICMP')
+            raise SystemExit(f'Review local {filename} before staging the update')
         source = source.replace(old, new, 1)
     (root / 'ui' / filename).write_text(source)
-PING_RUNTIME
+STAGE_RUNTIME
 auth_patch="$release/scripts/app_workspace.patch"
 incident_patch="$release/scripts/app_incidents.patch"
 client_patch="$release/scripts/app_client_pages.patch"
@@ -318,7 +319,9 @@ caddy /api/availability >"$backup/after-availability.json"
 cmp "$backup/availability.json" "$backup/after-availability.json"
 docker compose exec -T web python -c '
 import socket
-from app.main import db
+from app.main import PLAN_INTERVALS, db
+if PLAN_INTERVALS["team"] != 30:
+    raise SystemExit("Team check interval did not apply")
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_ICMP):
     pass
 with db() as c:
@@ -337,4 +340,5 @@ if [[ -f "$staged_main" ]]; then
 fi
 trap - ERR INT TERM
 echo 'Marketing SEO, workspace entry, monitoring, client pages, outage alarm, page journeys, and launch pages deployed and verified through Caddy.'
+echo 'Team primary check interval: 30 seconds.'
 echo "Backup: $backup"

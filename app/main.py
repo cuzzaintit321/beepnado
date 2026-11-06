@@ -63,7 +63,7 @@ STRIPE_PORTAL_CONFIGURATION = os.getenv('STRIPE_PORTAL_CONFIGURATION', '')
 LIVE_WEBHOOK_LOCK = asyncio.Lock()
 PRICE_IDS = {'pro': os.getenv('STRIPE_PRICE_PRO',''), 'team': os.getenv('STRIPE_PRICE_TEAM','')}
 PLAN_LIMITS = {'free': 2, 'pro': 20, 'team': 100}
-PLAN_INTERVALS = {'free': 300, 'pro': 60, 'team': 60}
+PLAN_INTERVALS = {'free': 300, 'pro': 60, 'team': 30}
 # Keep the oldest monitors active on downgrade. Later upgrades restore capacity
 # automatically because this filter leaves monitor rows and history intact.
 MONITOR_PLAN_LIMIT = 'CASE u.plan ' + ' '.join(
@@ -721,28 +721,51 @@ async def check_monitor(monitor_id, *, manual=False):
 
 async def scheduler():
     await asyncio.sleep(3)
-    while True:
+    semaphore = asyncio.Semaphore(8)
+    pending = {}
+    next_cleanup = 0.0
+
+    async def run(monitor_id):
         try:
-            due=[]; clock=datetime.now(timezone.utc)
-            with db() as c:
-                for row in c.execute('SELECT m.id,m.last_checked,m.maintenance_last_checked,m.probe_kind,u.plan ' + ACTIVE_MONITORS + ' AND m.heartbeat_interval_s IS NULL'):
-                    wait = EXPIRY_INTERVALS.get(row['probe_kind'], PLAN_INTERVALS.get(row['plan'], 300))
-                    last_check = max(row['last_checked'] or '', row['maintenance_last_checked'] or '')
-                    if not last_check or (clock-datetime.fromisoformat(last_check)).total_seconds()>=wait:
-                        due.append(row['id'])
-                c.execute('DELETE FROM checks WHERE checked_at<?',((clock-timedelta(days=30)).isoformat(timespec='seconds'),))
-                c.execute('DELETE FROM sessions WHERE expires_at<?',(now(),))
-                c.execute('DELETE FROM auth_tokens WHERE expires_at<?',(now(),))
-                c.execute('DELETE FROM rate_limits WHERE window_start<?',(int(time.time())-86400,))
-            semaphore=asyncio.Semaphore(8)
-            async def run(i):
-                async with semaphore:
-                    try: await check_monitor(i)
-                    except Exception as exc: print('Check error',i,type(exc).__name__,flush=True)
-            await asyncio.gather(*(run(i) for i in due))
-        except asyncio.CancelledError:raise
-        except Exception as exc: print('Scheduler error',type(exc).__name__,flush=True)
-        await asyncio.sleep(10)
+            async with semaphore:
+                await check_monitor(monitor_id)
+        except Exception as exc:
+            print('Check error', monitor_id, type(exc).__name__, flush=True)
+        finally:
+            pending.pop(monitor_id, None)
+
+    try:
+        while True:
+            try:
+                clock = datetime.now(timezone.utc)
+                due = []
+                with db() as c:
+                    for row in c.execute('SELECT m.id,m.last_checked,m.maintenance_last_checked,m.probe_kind,u.plan '
+                                         + ACTIVE_MONITORS + ' AND m.heartbeat_interval_s IS NULL'):
+                        if row['id'] in pending:
+                            continue
+                        wait = EXPIRY_INTERVALS.get(row['probe_kind'], PLAN_INTERVALS.get(row['plan'], 300))
+                        last_check = max(row['last_checked'] or '', row['maintenance_last_checked'] or '')
+                        if not last_check or (clock - datetime.fromisoformat(last_check)).total_seconds() >= wait:
+                            due.append(row['id'])
+                    if time.monotonic() >= next_cleanup:
+                        cutoff = (clock - timedelta(days=30)).isoformat(timespec='seconds')
+                        c.execute('DELETE FROM checks WHERE checked_at<?', (cutoff,))
+                        c.execute('DELETE FROM sessions WHERE expires_at<?', (now(),))
+                        c.execute('DELETE FROM auth_tokens WHERE expires_at<?', (now(),))
+                        c.execute('DELETE FROM rate_limits WHERE window_start<?', (int(time.time()) - 86400,))
+                        next_cleanup = time.monotonic() + 60
+                # Keep scanning for due monitors while probes run.
+                for monitor_id in due:
+                    pending[monitor_id] = asyncio.create_task(run(monitor_id))
+            except Exception as exc:
+                print('Scheduler error', type(exc).__name__, flush=True)
+            await asyncio.sleep(2)
+    finally:
+        tasks = tuple(pending.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def heartbeat_observation(c, monitor, state, error=None):

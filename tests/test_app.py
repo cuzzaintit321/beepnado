@@ -1,8 +1,11 @@
+import asyncio
 import os
 import tempfile
 import re
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
@@ -244,6 +247,69 @@ class BeepNadoTests(unittest.TestCase):
     def test_body_size_guard(self):
         r=self.client.post('/api/login',headers={'Content-Length':'70000','Origin':'http://testserver'},content='test')
         self.assertEqual(r.status_code,413)
+
+
+class SchedulerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_plan_intervals_while_a_slow_probe_is_running(self):
+        start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        current = start - timedelta(seconds=1)
+        finished = asyncio.Event()
+        slow_stopped = asyncio.Event()
+        probe_times = {}
+
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return current
+
+        async def advance(seconds):
+            nonlocal current
+            await asyncio.sleep(0)
+            if current >= start + timedelta(seconds=300):
+                finished.set()
+                await asyncio.Event().wait()
+            current += timedelta(seconds=seconds)
+
+        async def probe(monitor_id):
+            probe_times.setdefault(monitor_id, []).append(int((current - start).total_seconds()))
+            if monitor_id == slow_id:
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    slow_stopped.set()
+            with main.db() as c:
+                c.execute('UPDATE monitors SET last_checked=? WHERE id=?', (main.now(), monitor_id))
+
+        scheduler_asyncio = SimpleNamespace(sleep=advance, Semaphore=asyncio.Semaphore,
+                                            create_task=asyncio.create_task, gather=asyncio.gather)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(main, 'DB_PATH', str(Path(directory) / 'scheduler.sqlite3')), \
+             patch.object(main, 'datetime', Clock), patch.object(main, 'asyncio', scheduler_asyncio), \
+             patch.object(main, 'check_monitor', probe):
+            main.init_db()
+            plan_ids = {}
+            with main.db() as c:
+                checked_at = start.isoformat()
+                for plan in ('free', 'pro', 'team'):
+                    user_id = c.execute('INSERT INTO users(email,password_hash,created_at,plan) VALUES(?,?,?,?)',
+                                        (f'{plan}@example.test', 'unused', checked_at, plan)).lastrowid
+                    plan_ids[plan] = c.execute('''INSERT INTO monitors(user_id,name,url,created_at,last_checked)
+                        VALUES(?,?,?,?,?)''', (user_id, plan, 'https://example.test/', checked_at, checked_at)).lastrowid
+                slow_user_id = c.execute('INSERT INTO users(email,password_hash,created_at) VALUES(?,?,?)',
+                                         ('slow@example.test', 'unused', checked_at)).lastrowid
+                slow_id = c.execute('INSERT INTO monitors(user_id,name,url,created_at) VALUES(?,?,?,?)',
+                                    (slow_user_id, 'slow', 'https://example.test/slow', checked_at)).lastrowid
+            task = asyncio.create_task(main.scheduler())
+            try:
+                await asyncio.wait_for(finished.wait(), timeout=3)
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+        self.assertEqual({plan: probe_times[monitor_id][0] for plan, monitor_id in plan_ids.items()},
+                         {'free': 300, 'pro': 60, 'team': 30})
+        self.assertEqual(probe_times[slow_id], [2])
+        self.assertTrue(slow_stopped.is_set())
 
 
 if __name__=='__main__':unittest.main()
