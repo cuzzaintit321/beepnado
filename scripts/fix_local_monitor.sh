@@ -1,100 +1,110 @@
 #!/usr/bin/env bash
-# Repair same-host monitoring of Reboot Syndicate via BeepNado's shared Caddy network.
-# Run on Fedora AFTER git pull. Only the owner's exact domain is allowlisted.
+# Restore the owner-hosted website route through Caddy on yeet.
 set -Eeuo pipefail
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOST="yeet"
 
-echo '== Checking trusted local Caddy HTTPS from the monitor container =='
-ssh "$HOST" 'bash -s' <<'REMOTE'
-set -Eeuo pipefail
-cd "$HOME/beepnado"
-docker compose exec -T web python - <<'PY'
-import asyncio, ssl
-
-async def check():
-    reader, writer = await asyncio.wait_for(asyncio.open_connection(
-        'jason-portfolio', 443, ssl=ssl.create_default_context(),
-        server_hostname='rebootsyndicate.com'), timeout=10)
-    try:
-        writer.write(b'GET / HTTP/1.1\r\nHost: rebootsyndicate.com\r\nConnection: close\r\n\r\n')
-        await asyncio.wait_for(writer.drain(), 5)
-        line = await asyncio.wait_for(reader.readline(), 10)
-        print('Local Caddy response:', line.decode(errors='replace').strip())
-        assert line.startswith(b'HTTP/1.') and int(line.split()[1]) < 400, 'Caddy target is not healthy'
-    finally:
-        writer.close()
-        try:
-            await asyncio.wait_for(writer.wait_closed(), 3)
-        except ssl.SSLError as exc:
-            # Caddy returned HTTP 200 with valid TLS. Ignore only the
-            # OpenSSL shutdown race caused by unread response-body bytes.
-            # Do NOT suppress certificate or handshake errors.
-            if 'APPLICATION_DATA_AFTER_CLOSE_NOTIFY' not in str(exc):
-                raise
-
-asyncio.run(check())
-PY
-REMOTE
-
-echo '== Deploying tested BeepNado fix with source/SQLite backup =='
-bash "$ROOT/scripts/push_upgrade_from_fedora.sh"
-
-echo '== Enabling strictly allowlisted same-host monitoring =='
-ssh "$HOST" 'bash -s' <<'REMOTE'
-set -Eeuo pipefail
-cd "$HOME/beepnado"
-cp -p .env ".env.before-self-monitor-$(date -u +%Y%m%dT%H%M%SZ)"
-python3 - <<'PY'
-from pathlib import Path
-p=Path('.env')
-lines=p.read_text().splitlines()
-settings = {
-    'SELF_HOSTED_PUBLIC_IP': '68.205.135.160',
-    'SELF_HOSTED_DOMAINS': 'rebootsyndicate.com,www.rebootsyndicate.com'
-}
-for key, value in settings.items():
-    for n, line in enumerate(lines):
-        if line.startswith(key+'='):
-            lines[n] = key+'='+value
-            break
-    else:
-        lines.append(key+'='+value)
-p.write_text('\n'.join(lines)+'\n')
-PY
-chmod 600 .env
-docker compose up -d --force-recreate
-READY=0
-for _ in $(seq 1 20); do
-    if curl -fsS --max-time 3 http://127.0.0.1:8490/health/ready >/dev/null 2>&1; then READY=1; break; fi
-    sleep 2
-done
-if [[ "$READY" != 1 ]]; then
-    echo 'BeepNado did not pass readiness. Restore the .env backup before continuing.' >&2
-    exit 1
+if (( $# == 0 )); then
+    exec ssh yeet 'cd "$HOME/beepnado" && bash -s -- --local' <"${BASH_SOURCE[0]}"
+fi
+if [[ $# != 1 || $1 != --local || ! -f compose.yaml || ! -f app/main.py ]]; then
+    echo 'Run this script from Fedora, or run it with --local in the BeepNado directory on yeet.' >&2
+    exit 2
 fi
 
-docker compose exec -T web python - <<'PY'
+exec 9>.enable-signup.lock
+flock -n 9 || { echo 'Another BeepNado update is running.' >&2; exit 1; }
+lan_ip=192.168.1.130
+
+check_caddy() {
+    docker compose exec -T web python - "$1" <<'PY'
 import asyncio
-from app.main import probe, db, check_monitor, probe_connection_target
+import sys
 
-assert probe_connection_target('rebootsyndicate.com','68.205.135.160') == 'jason-portfolio', 'Owner route not active'
-assert probe_connection_target('other-site.com','68.205.135.160') == '68.205.135.160', 'Unsafe URL redirect'
+from app import main
 
-async def run():
-    result=await probe('https://rebootsyndicate.com/')
-    print('Real monitor result:',result)
+domains = ('beepnado.com', 'rebootsyndicate.com', 'jasonpauledwards.com')
+if sys.argv[1]:
+    main.SELF_HOSTED_CADDY = sys.argv[1]
+
+
+async def check(domain):
+    url = f'https://{domain}/'
+    host, public_ip, _, _, _ = await main.validate_url(url)
+    if main.probe_connection_target(host, public_ip) != main.SELF_HOSTED_CADDY:
+        raise RuntimeError(f'{domain} did not select the configured same-host route')
+    result = await main.probe(url, expected_status=200)
     if result['state'] != 'up':
-        raise SystemExit('Check still failed. Inspect public DNS and Caddy.')
-    with db() as conn:
-        ids=[row[0] for row in conn.execute(
-            'SELECT id FROM monitors WHERE url IN (?,?) AND enabled=1',
-            ('https://rebootsyndicate.com','https://rebootsyndicate.com/'))]
-    for monitor_id in ids:
-        print('Saved monitor result:',await check_monitor(monitor_id))
+        raise RuntimeError(f"{domain}: {result['error'] or result.get('detail') or result['state']}")
+    print(f'{domain} via {main.SELF_HOSTED_CADDY}: HTTPS {result["http_code"]}', flush=True)
 
-asyncio.run(run())
+
+async def verify():
+    results = await asyncio.gather(*(check(domain) for domain in domains), return_exceptions=True)
+    errors = [str(result) for result in results if isinstance(result, Exception)]
+    if errors:
+        raise SystemExit('\n'.join(errors))
+
+
+asyncio.run(verify())
 PY
-echo 'SUCCESS: BeepNado can monitor Reboot Syndicate on its local Caddy route.'
-echo 'NOTE: Same-host checks do NOT detect home Internet/server-wide outages.'
-REMOTE
+}
+
+if check_caddy ''; then
+    echo 'All three local HTTPS checks are passing.'
+    exit
+fi
+
+echo 'Checking the LAN route to Caddy from inside BeepNado.'
+check_caddy "$lan_ip"
+
+override=compose.override.yaml
+settings=$(printf '%s\n' 'services:' '  web:' '    extra_hosts:' "      - 'jason-portfolio=$lan_ip'")
+for file in compose.override.yaml compose.override.yml docker-compose.override.yaml docker-compose.override.yml; do
+    if [[ -e "$file" || -L "$file" ]]; then
+        if [[ "$file" != "$override" || -L "$file" ]] || ! cmp -s "$file" <(printf '%s\n' "$settings"); then
+            echo "Existing Compose override requires a manual merge: $file" >&2
+            exit 1
+        fi
+    fi
+done
+
+created=0
+recreate_started=0
+temporary=$(mktemp .local-caddy.XXXXXXXX)
+trap 'rm -f -- "$temporary"' EXIT
+rollback() {
+    local status=$1
+    trap - ERR INT TERM
+    if (( created )); then rm -f -- "$override"; fi
+    if (( recreate_started )) && ! docker compose up -d --no-deps --no-build --force-recreate --wait --wait-timeout 60 web; then
+        echo 'The previous Compose file is restored. BeepNado needs a restart.' >&2
+    else
+        echo 'Restored the previous BeepNado Compose configuration.' >&2
+    fi
+    exit "$status"
+}
+trap 'rollback $?' ERR
+trap 'rollback 130' INT
+trap 'rollback 143' TERM
+
+if [[ ! -e "$override" ]]; then
+    printf '%s\n' "$settings" >"$temporary"
+    mv -- "$temporary" "$override"
+    created=1
+fi
+
+docker compose config --format json | python3 -c '
+import json, sys
+hosts = json.load(sys.stdin)["services"]["web"].get("extra_hosts", {})
+ip = sys.argv[1]
+if isinstance(hosts, dict):
+    valid = hosts.get("jason-portfolio") in (ip, [ip])
+else:
+    valid = f"jason-portfolio={ip}" in hosts or f"jason-portfolio:{ip}" in hosts
+if not valid:
+    raise SystemExit("Compose did not load the local Caddy mapping")
+' "$lan_ip"
+recreate_started=1
+docker compose up -d --no-deps --no-build --force-recreate --wait --wait-timeout 60 web
+check_caddy ''
+trap - ERR INT TERM
+echo 'BeepNado can reach all three local sites again.'
