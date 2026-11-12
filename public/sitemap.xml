@@ -36,4 +36,14 @@
   <url>
     <loc>https://beepnado.com/features/client-status-pages/</loc>
   </url>
+  <url><loc>https://beepnado.com/resources/</loc></url>
+  <url><loc>https://beepnado.com/guides/monitor-linux-cron/</loc></url>
+  <url><loc>https://beepnado.com/guides/monitor-api-endpoints/</loc></url>
+  <url><loc>https://beepnado.com/guides/ssl-certificate-expiration/</loc></url>
+  <url><loc>https://beepnado.com/guides/website-uptime-sla/</loc></url>
+  <url><loc>https://beepnado.com/guides/http-502-503-errors/</loc></url>
+  <url><loc>https://beepnado.com/solutions/saas/</loc></url>
+  <url><loc>https://beepnado.com/solutions/wordpress/</loc></url>
+  <url><loc>https://beepnado.com/solutions/ecommerce/</loc></url>
+  <url><loc>https://beepnado.com/solutions/developers/</loc></url>
 </urlset>
