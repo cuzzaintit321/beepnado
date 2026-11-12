@@ -1,0 +1,16 @@
+'use strict';
+const assert = require('node:assert/strict');
+const {calculate} = require('../public/static/seo-tools.js');
+const input = obj => new Map(Object.entries(obj));
+assert.match(calculate('sla',input({days:30,pct:99.9})),/43\.2 minutes/);
+assert.match(calculate('cost',input({visits:100,rate:2,order:75,minutes:60})),/\$150/);
+assert.equal(calculate('cron',input({mode:'weekly',minute:0,hour:2,weekday:1})),'0 2 * * 1');
+assert.equal(calculate('cron',input({mode:'interval',interval:5})),'*/5 * * * *');
+assert.equal(calculate('json',input({json:'{"ok":true}'})),'{\n  "ok": true\n}');
+assert.throws(()=>calculate('json',input({json:'{'})));
+assert.match(calculate('status',input({status:502})),/Bad Gateway/);
+assert.match(calculate('score',input({availability:'on',tls:'on'})),/45\/100/);
+assert.match(calculate('ssl',input({expiry:'2026-12-12',threshold:30}),new Date('2026-11-12T12:00:00Z')),/30 days/);
+assert.match(calculate('latency',input({samples:'120, 180, 230, 140, 310'})),/Median: 180 ms/);
+assert.throws(()=>calculate('latency',input({samples:'-2,3'})));
+console.log('SEO tool calculation tests passed');
