@@ -1,4 +1,4 @@
-/* Dashboard-only sound for newly observed confirmed outages. */
+/* Persistent server-side email protection; optional dashboard-only sound. */
 (() => {
   const panel = $('outage-alarm');
   if (!panel) return;
@@ -9,7 +9,7 @@
   const banner = $('outage-alarm-banner');
   const summary = $('outage-alarm-summary');
   const list = $('outage-alarm-incidents');
-  const muted = 'Muted. Arm it to hear alerts while this dashboard tab is open.';
+  const muted = 'Browser sound muted. Email protection is independent of this tab.';
   let audio;
   let silence;
   let session;
@@ -27,7 +27,7 @@
     previous?.release?.();
     soundRequest = undefined;
     silence?.();
-    toggle.textContent = 'Arm alarm';
+    toggle.textContent = 'Enable sound';
     setStatus(message);
     showIncidents([]);
   }
@@ -140,7 +140,7 @@
       }
       if (fresh.length) play();
       setStatus(audio.state === 'running'
-        ? 'Armed in this tab. Keep the dashboard open to hear outages.'
+        ? 'Browser sound enabled while this tab is open.'
         : 'Browser paused audio. Click Test sound to resume it.');
     } catch {
       if (session === armed) setStatus('Alarm connection interrupted. Retrying…');
@@ -159,7 +159,7 @@
 
     const armed = {account: user.id, alerts: new Set()};
     session = armed;
-    toggle.textContent = 'Mute alarm';
+    toggle.textContent = 'Mute sound';
     setStatus('Arming…');
     try {
       await enableAudio();
@@ -199,5 +199,74 @@
 
   $('signout')?.addEventListener('click', () => stop());
   window.addEventListener('pagehide', () => stop());
+  // Email alert state lives in the account database, not browser storage.
+  const emailRow = document.createElement('div');
+  emailRow.className = 'bn-alarm-toolbar';
+  const emailStatus = document.createElement('p');
+  emailStatus.setAttribute('role', 'status');
+  const actions = document.createElement('div');
+  actions.className = 'bn-alarm-actions';
+  const emailToggle = document.createElement('button');
+  const emailTest = document.createElement('button');
+  for (const button of [emailToggle, emailTest]) {
+    button.type = 'button';
+    button.className = 'bn-btn bn-btn-small';
+    button.disabled = true;
+  }
+  emailToggle.classList.add('bn-btn-primary');
+  emailToggle.textContent = 'Arm email alerts';
+  emailTest.textContent = 'Test email';
+  actions.append(emailToggle, emailTest);
+  emailRow.append(emailStatus, actions);
+  panel.insertBefore(emailRow, panel.firstChild);
+  let settings, account, revision = 0;
+  function renderEmail() {
+    emailToggle.disabled = !settings;
+    emailTest.disabled = !settings?.armed || !settings?.email_ready;
+    emailToggle.textContent = settings?.armed ? 'Disarm email alerts' : 'Arm email alerts';
+    emailToggle.setAttribute('aria-pressed', String(!!settings?.armed));
+    emailStatus.textContent = !settings ? 'Loading email protection…' : !settings.armed
+      ? 'Email alerts disarmed. Monitoring continues.' : !settings.email_ready
+      ? 'Email alerts armed, but server email delivery is not configured.'
+      : 'Email alerts armed — outage and recovery emails go to ' + settings.email + ', even when you close this page.';
+  }
+  async function loadEmail() {
+    if (!signedIn || !user || $('workspace').classList.contains('hidden')) {
+      revision++; account = undefined; settings = undefined; renderEmail(); return;
+    }
+    if (account === user.id) return;
+    account = user.id; settings = undefined; renderEmail();
+    const version = ++revision;
+    try {
+      const result = await api('/api/alarm-settings');
+      if (version === revision) { settings = result; renderEmail(); }
+    } catch (error) {
+      if (version === revision) { account = undefined; emailStatus.textContent = 'Unable to load email protection. Refresh to retry.'; }
+    }
+  }
+  emailToggle.addEventListener('click', async () => {
+    if (!settings || !signedIn || account !== user?.id) return;
+    const version = revision;
+    emailToggle.disabled = emailTest.disabled = true;
+    try {
+      const result = await api('/api/alarm-settings', {method: 'PUT', body: JSON.stringify({armed: !settings.armed})});
+      if (version === revision) settings = result;
+    } catch (error) { if (version === revision) toast(error.message); }
+    finally { if (version === revision) renderEmail(); }
+  });
+  emailTest.addEventListener('click', async () => {
+    if (!settings?.armed || !settings.email_ready || !signedIn || account !== user?.id) return;
+    const version = revision;
+    emailTest.disabled = true;
+    try {
+      await api('/api/alarm-settings/test', {method: 'POST'});
+      if (version === revision) toast('Test email queued. Check your inbox shortly.');
+    } catch (error) { if (version === revision) toast(error.message); }
+    finally { if (version === revision) renderEmail(); }
+  });
+  new MutationObserver(loadEmail).observe($('workspace'), {attributes: true, attributeFilter: ['class']});
+  void loadEmail();
+  toggle.textContent = 'Enable sound';
+  setStatus(muted);
   panel.hidden = false;
 })();
