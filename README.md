@@ -34,7 +34,9 @@ A saved client page can generate a 7-day or 30-day report, even while it is a dr
 
 ## Dashboard outage alarm
 
-Select **Arm alarm** in the workspace to hear two short beeps when BeepNado first observes a newly confirmed outage. **Test sound** plays the signal on demand. The incident banner links to **Investigate**. **Mute alarm** silences it. Arm the alarm again after reloading, and keep the dashboard tab open with browser audio enabled.
+Email protection is saved in your account and defaults to armed, preserving existing outage/recovery email behavior. **Arm email alerts** enables server-side delivery to your verified account address; **Disarm email alerts** stops queuing new incident emails (messages already queued may still be delivered). Monitor checks and incident history continue regardless of your email preference. Browser closure, logout and application restarts do not change the saved preference. SMTP must be configured; **Test email** queues a rate-limited test message, and you should confirm receipt in your inbox.
+
+Optional **Enable sound** plays two short beeps when an open dashboard tab observes a newly confirmed outage. **Test sound** plays the signal on demand. The incident banner links to **Investigate**. **Mute sound** does not change email protection. Browser audio still requires an open tab and a user gesture. A primary server that loses power or internet access cannot send email; use an independent off-site worker to cover this failure mode.
 
 ## Public monitoring from a second network
 
