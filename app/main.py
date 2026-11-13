@@ -209,6 +209,8 @@ def init_db():
         columns={r['name'] for r in c.execute('PRAGMA table_info(users)')}
         if 'email_verified_at' not in columns:
             c.execute('ALTER TABLE users ADD COLUMN email_verified_at TEXT')
+        if 'email_alerts_enabled' not in columns:
+            c.execute('ALTER TABLE users ADD COLUMN email_alerts_enabled INTEGER NOT NULL DEFAULT 1')
         monitor_columns = {r['name'] for r in c.execute('PRAGMA table_info(monitors)')}
         for name, column_type in (
             ('required_phrase', "TEXT NOT NULL DEFAULT ''"),
@@ -316,8 +318,8 @@ def throttle(request: Request, action: str, subject: str, limit: int, seconds: i
 
 def enqueue_alert(c, user_id: int, subject: str, text: str):
     if not email_ready():return
-    u=c.execute('SELECT email,email_verified_at FROM users WHERE id=?',(user_id,)).fetchone()
-    if u and u['email_verified_at']:
+    u=c.execute('SELECT email,email_verified_at,email_alerts_enabled FROM users WHERE id=?',(user_id,)).fetchone()
+    if u and u['email_verified_at'] and u['email_alerts_enabled']:
         c.execute('INSERT INTO email_outbox(recipient,subject,body,created_at,next_attempt) VALUES(?,?,?,?,?)',
                   (u['email'],subject,text,now(),int(time.time())))
 
@@ -1056,6 +1058,41 @@ def displayed_state(monitor, window, clock):
     if monitor['maintenance_last_checked'] and monitor['state'] != 'down':
         return 'pending'
     return monitor['state']
+
+
+class AlarmPreference(BaseModel):
+    armed: bool
+
+
+def alarm_settings(user_id):
+    with db() as c:
+        row = c.execute('SELECT email_alerts_enabled,email FROM users WHERE id=?', (user_id,)).fetchone()
+    return {'armed': bool(row['email_alerts_enabled']), 'email_ready': email_ready(), 'email': row['email']}
+
+
+@app.get('/api/alarm-settings')
+def get_alarm_settings(user=Depends(require_user)):
+    return alarm_settings(user['id'])
+
+
+@app.put('/api/alarm-settings')
+def set_alarm_settings(body: AlarmPreference, user=Depends(require_csrf)):
+    with db() as c:
+        c.execute('UPDATE users SET email_alerts_enabled=? WHERE id=?', (int(body.armed), user['id']))
+    return alarm_settings(user['id'])
+
+
+@app.post('/api/alarm-settings/test')
+def test_alarm_email(request: Request, user=Depends(require_csrf)):
+    throttle(request, 'alarm-test', str(user['id']), 3, 600)
+    if not email_ready():
+        raise HTTPException(503, 'Email delivery is not configured')
+    with db() as c:
+        row = c.execute('SELECT email_alerts_enabled FROM users WHERE id=?', (user['id'],)).fetchone()
+        if not row['email_alerts_enabled']:
+            raise HTTPException(409, 'Arm email alerts first')
+        enqueue_alert(c, user['id'], 'BeepNado test alert', 'Your BeepNado email alerts are configured. This is a test, not an outage.')
+    return {'queued': True}
 
 
 @app.get('/api/alarm-incidents')
