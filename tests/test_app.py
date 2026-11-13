@@ -39,6 +39,35 @@ class BeepNadoTests(unittest.TestCase):
     def tearDown(self):
         self.client.__exit__(None,None,None)
 
+    def test_persistent_email_alarm(self):
+        settings = self.client.get('/api/alarm-settings')
+        self.assertEqual(settings.status_code, 200)
+        self.assertTrue(settings.json()['armed'])
+        self.assertEqual(settings.json()['email'], self.email)
+        self.assertEqual(self.client.put('/api/alarm-settings', json={'armed':False}).status_code,403)
+        self.assertEqual(self.client.put('/api/alarm-settings', headers=self.headers,
+                                         json={'armed':False}).status_code,200)
+        uid = self.client.get('/api/me').json()['user']['id']
+        with main.db() as c:
+            main.enqueue_alert(c, uid, 'Disarmed alert', 'Should not be queued')
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM email_outbox WHERE recipient=? AND subject=?',
+                                       (self.email,'Disarmed alert')).fetchone()[0],0)
+        self.assertEqual(self.client.post('/api/alarm-settings/test',headers=self.headers).status_code,409)
+        self.assertFalse(self.client.get('/api/alarm-settings').json()['armed'])
+        self.assertTrue(self.client.put('/api/alarm-settings', headers=self.headers,
+                                        json={'armed':True}).json()['armed'])
+        self.assertTrue(self.client.post('/api/alarm-settings/test',headers=self.headers).json()['queued'])
+        self.assertEqual(self.client.post('/api/logout',headers=self.headers).status_code,200)
+        self.assertEqual(self.client.get('/api/alarm-settings').status_code,401)
+        main.init_db()
+        with main.db() as c:
+            main.enqueue_alert(c, uid, 'Offline outage', 'Browser is closed')
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM email_outbox WHERE recipient=? AND subject=?',
+                                       (self.email,'Offline outage')).fetchone()[0],1)
+        self.assertEqual(self.client.post('/api/login',json={'email':self.email,
+                         'password':'LongRandomPassword123!'},headers={'Origin':'http://testserver'}).status_code,200)
+        self.assertTrue(self.client.get('/api/alarm-settings').json()['armed'])
+
     def test_register_sessions_and_account_guard(self):
         self.assertEqual(self.client.get('/api/dashboard').status_code,200)
         self.assertEqual(self.client.post('/api/status-page',json={'title':'My Status','slug':'my-test-status'}).status_code,403)
