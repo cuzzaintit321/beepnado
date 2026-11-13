@@ -1,94 +1,28 @@
-/* Persistent server-side email protection; optional dashboard-only sound. */
+/* One account-level switch for persistent outage and recovery emails. */
 (() => {
   const panel = $('outage-alarm');
   if (!panel) return;
-
   const toggle = $('outage-alarm-toggle');
-  const test = $('outage-alarm-test');
   const status = $('outage-alarm-state');
+  $('outage-alarm-test')?.remove();
   const banner = $('outage-alarm-banner');
   const summary = $('outage-alarm-summary');
   const list = $('outage-alarm-incidents');
-  const muted = 'Browser sound muted. Email protection is independent of this tab.';
-  let audio;
-  let silence;
-  let session;
-  let soundRequest;
-
-  function setStatus(message) {
-    if (status.textContent !== message) status.textContent = message;
+  let settings, account, revision = 0, busy = false, timer;
+  const active = () => signedIn && user && !$('workspace').classList.contains('hidden');
+  function render() {
+    toggle.disabled = busy || !settings;
+    toggle.textContent = settings?.armed ? 'Disarm' : 'Arm';
+    toggle.setAttribute('aria-pressed', String(!!settings?.armed));
+    status.textContent = !settings ? 'Loading alert protection…' : !settings.armed
+      ? 'Disarmed — monitoring continues without new incident emails.' : !settings.email_ready
+      ? 'Armed — email delivery is not configured on the server.'
+      : 'Armed — outage and recovery emails remain enabled even when you close this page.';
   }
-
-  function stop(message = muted) {
-    const previous = session;
-    session = undefined;
-    clearTimeout(previous?.timer);
-    previous?.request?.abort();
-    previous?.release?.();
-    soundRequest = undefined;
-    silence?.();
-    toggle.textContent = 'Enable sound';
-    setStatus(message);
-    showIncidents([]);
-  }
-
-  async function enableAudio() {
-    audio ??= new AudioContext();
-    await audio.resume();
-    if (audio.state !== 'running') throw new Error('Sound is unavailable');
-  }
-
-  function play() {
-    if (audio?.state !== 'running') return false;
-    silence?.();
-    const output = audio.createGain();
-    output.connect(audio.destination);
-    silence = () => {
-      output.disconnect();
-      silence = undefined;
-    };
-    [660, 880].forEach((frequency, index) => {
-      const start = audio.currentTime + 0.02 + index * 0.22;
-      const tone = audio.createOscillator();
-      const envelope = audio.createGain();
-      tone.frequency.value = frequency;
-      envelope.gain.setValueAtTime(0, start);
-      envelope.gain.linearRampToValueAtTime(0.12, start + 0.025);
-      envelope.gain.linearRampToValueAtTime(0, start + 0.15);
-      tone.connect(envelope).connect(output);
-      tone.start(start);
-      tone.stop(start + 0.16);
-      const end = silence;
-      tone.onended = () => {
-        tone.disconnect();
-        envelope.disconnect();
-        if (index === 1 && silence === end) end();
-      };
-    });
-    return true;
-  }
-
-  async function investigate(incident, button) {
-    const armed = session;
-    if (!armed) return;
-    button.disabled = true;
-    try {
-      const data = await api('/api/dashboard');
-      if (session !== armed || !signedIn || user?.id !== armed.account) return;
-      if (!window.investigateOutage(incident, data)) toast('This monitor is no longer in your workspace.');
-    } catch (error) {
-      toast(error.message);
-    } finally {
-      button.disabled = false;
-    }
-  }
-
   function showIncidents(incidents) {
-    const wasFocused = list.contains(document.activeElement);
-    banner.hidden = incidents.length === 0;
-    summary.textContent = incidents.length
-      ? (incidents.length === 1 ? 'Confirmed outage' : incidents.length + ' confirmed outages')
-      : '';
+    const focused = list.contains(document.activeElement);
+    banner.hidden = !incidents.length;
+    summary.textContent = incidents.length === 1 ? 'Confirmed outage' : incidents.length + ' confirmed outages';
     list.replaceChildren(...incidents.map(incident => {
       const row = document.createElement('li');
       const name = document.createElement('strong');
@@ -98,175 +32,64 @@
       button.className = 'bn-btn bn-btn-small';
       button.textContent = 'Investigate';
       button.setAttribute('aria-label', 'Investigate ' + incident.monitor_name);
-      button.addEventListener('click', () => investigate(incident, button));
+      button.addEventListener('click', async () => {
+        const version = revision;
+        button.disabled = true;
+        try {
+          const data = await api('/api/dashboard');
+          if (version === revision && active() && account === user.id &&
+              !window.investigateOutage(incident, data)) toast('This monitor is no longer in your workspace.');
+        } catch (error) { if (version === revision) toast(error.message); }
+        finally { button.disabled = false; }
+      });
       row.append(name, button);
       return row;
     }));
-    if (wasFocused) (list.querySelector('button') || toggle).focus();
+    if (focused) (list.querySelector('button') || toggle).focus();
   }
-
-  async function poll(armed) {
-    if (!signedIn || user?.id !== armed.account || $('workspace').classList.contains('hidden')) {
-      stop();
-      return;
-    }
-    const request = new AbortController();
-    armed.request = request;
-    const deadline = setTimeout(() => request.abort(), 10000);
+  async function poll(version) {
+    if (version !== revision || !active() || account !== user.id) return;
     try {
-      const response = await fetch('/api/alarm-incidents', {signal: request.signal});
-      if (session !== armed) return;
-      if (response.status === 401 || response.status === 403) {
-        stop('Sign in again to arm the alarm.');
-        return;
-      }
-      if (!response.ok) throw new Error('Alarm feed unavailable');
-      const data = await response.json();
-      if (session !== armed) return;
-      if (data.account_id !== armed.account) {
-        stop();
-        return;
-      }
-
-      const active = new Map(data.incidents.map(incident => [
-        [incident.id, incident.monitor_id, incident.opened_at].join('/'), incident
-      ]));
-      const fresh = armed.known ? [...active.keys()].filter(key => !armed.known.has(key)) : [];
-      const previous = armed.alerts;
-      armed.alerts = new Set([...previous, ...fresh].filter(key => active.has(key)));
-      armed.known = active;
-      if (fresh.length || previous.size !== armed.alerts.size) {
-        showIncidents([...armed.alerts].map(key => active.get(key)));
-      }
-      if (fresh.length) play();
-      setStatus(audio.state === 'running'
-        ? 'Browser sound enabled while this tab is open.'
-        : 'Browser paused audio. Click Test sound to resume it.');
-    } catch {
-      if (session === armed) setStatus('Alarm connection interrupted. Retrying…');
-    } finally {
-      clearTimeout(deadline);
-      if (session === armed) armed.timer = setTimeout(() => poll(armed), 15000);
-    }
+      const data = await api('/api/alarm-incidents');
+      if (version === revision && active() && data.account_id === account) showIncidents(data.incidents);
+    } catch { /* Keep email protection independent of the dashboard feed. */ }
+    finally { if (version === revision) timer = setTimeout(() => poll(version), 15000); }
   }
-
-  toggle.addEventListener('click', async () => {
-    if (session) {
-      stop();
-      return;
-    }
-    if (!signedIn || !user) return;
-
-    const armed = {account: user.id, alerts: new Set()};
-    session = armed;
-    toggle.textContent = 'Mute sound';
-    setStatus('Arming…');
-    try {
-      await enableAudio();
-      if (session !== armed) return;
-      if (!navigator.locks) {
-        await poll(armed);
-        return;
-      }
-      await navigator.locks.request('beepnado-outage-alarm', {ifAvailable: true}, lock => {
-        if (session !== armed) return;
-        if (!lock) {
-          stop('The alarm is already armed in another tab.');
-          return;
-        }
-        return new Promise(resolve => {
-          armed.release = resolve;
-          void poll(armed);
-        });
-      });
-    } catch {
-      if (session === armed) stop('Could not arm the alarm. Check browser audio and try again.');
-    }
-  });
-
-  test.addEventListener('click', async () => {
-    const request = Symbol();
-    soundRequest = request;
-    try {
-      await enableAudio();
-      if (soundRequest === request && signedIn && !$('workspace').classList.contains('hidden') && play()) {
-        toast('Played the test alarm.');
-      }
-    } catch {
-      if (soundRequest === request) toast('Browser audio is unavailable.');
-    }
-  });
-
-  $('signout')?.addEventListener('click', () => stop());
-  window.addEventListener('pagehide', () => stop());
-  // Email alert state lives in the account database, not browser storage.
-  const emailRow = document.createElement('div');
-  emailRow.className = 'bn-alarm-toolbar';
-  const emailStatus = document.createElement('p');
-  emailStatus.setAttribute('role', 'status');
-  const actions = document.createElement('div');
-  actions.className = 'bn-alarm-actions';
-  const emailToggle = document.createElement('button');
-  const emailTest = document.createElement('button');
-  for (const button of [emailToggle, emailTest]) {
-    button.type = 'button';
-    button.className = 'bn-btn bn-btn-small';
-    button.disabled = true;
-  }
-  emailToggle.classList.add('bn-btn-primary');
-  emailToggle.textContent = 'Arm email alerts';
-  emailTest.textContent = 'Test email';
-  actions.append(emailToggle, emailTest);
-  emailRow.append(emailStatus, actions);
-  panel.insertBefore(emailRow, panel.firstChild);
-  let settings, account, revision = 0;
-  function renderEmail() {
-    emailToggle.disabled = !settings;
-    emailTest.disabled = !settings?.armed || !settings?.email_ready;
-    emailToggle.textContent = settings?.armed ? 'Disarm email alerts' : 'Arm email alerts';
-    emailToggle.setAttribute('aria-pressed', String(!!settings?.armed));
-    emailStatus.textContent = !settings ? 'Loading email protection…' : !settings.armed
-      ? 'Email alerts disarmed. Monitoring continues.' : !settings.email_ready
-      ? 'Email alerts armed, but server email delivery is not configured.'
-      : 'Email alerts armed — outage and recovery emails go to ' + settings.email + ', even when you close this page.';
-  }
-  async function loadEmail() {
-    if (!signedIn || !user || $('workspace').classList.contains('hidden')) {
-      revision++; account = undefined; settings = undefined; renderEmail(); return;
+  async function load() {
+    if (!active()) {
+      revision++; clearTimeout(timer); account = undefined; settings = undefined; busy = false;
+      showIncidents([]); render(); return;
     }
     if (account === user.id) return;
-    account = user.id; settings = undefined; renderEmail();
+    clearTimeout(timer);
+    account = user.id; settings = undefined; busy = false; render();
     const version = ++revision;
     try {
       const result = await api('/api/alarm-settings');
-      if (version === revision) { settings = result; renderEmail(); }
-    } catch (error) {
-      if (version === revision) { account = undefined; emailStatus.textContent = 'Unable to load email protection. Refresh to retry.'; }
+      if (version === revision) { settings = result; render(); void poll(version); }
+    } catch {
+      if (version === revision) {
+        account = undefined;
+        status.textContent = 'Unable to load alert protection. Refresh to retry.';
+      }
     }
   }
-  emailToggle.addEventListener('click', async () => {
-    if (!settings || !signedIn || account !== user?.id) return;
+  toggle.addEventListener('click', async () => {
+    if (busy || !settings || !active() || account !== user.id) return;
     const version = revision;
-    emailToggle.disabled = emailTest.disabled = true;
+    busy = true; render();
     try {
-      const result = await api('/api/alarm-settings', {method: 'PUT', body: JSON.stringify({armed: !settings.armed})});
+      const result = await api('/api/alarm-settings', {
+        method: 'PUT', body: JSON.stringify({armed: !settings.armed})
+      });
       if (version === revision) settings = result;
     } catch (error) { if (version === revision) toast(error.message); }
-    finally { if (version === revision) renderEmail(); }
+    finally { if (version === revision) { busy = false; render(); } }
   });
-  emailTest.addEventListener('click', async () => {
-    if (!settings?.armed || !settings.email_ready || !signedIn || account !== user?.id) return;
-    const version = revision;
-    emailTest.disabled = true;
-    try {
-      await api('/api/alarm-settings/test', {method: 'POST'});
-      if (version === revision) toast('Test email queued. Check your inbox shortly.');
-    } catch (error) { if (version === revision) toast(error.message); }
-    finally { if (version === revision) renderEmail(); }
-  });
-  new MutationObserver(loadEmail).observe($('workspace'), {attributes: true, attributeFilter: ['class']});
-  void loadEmail();
-  toggle.textContent = 'Enable sound';
-  setStatus(muted);
+  new MutationObserver(load).observe($('workspace'), {attributes: true, attributeFilter: ['class']});
+  window.addEventListener('pagehide', () => { revision++; clearTimeout(timer); account = undefined; });
+  window.addEventListener('pageshow', () => { void load(); });
+  render();
   panel.hidden = false;
+  void load();
 })();
