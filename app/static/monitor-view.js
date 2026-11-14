@@ -10,7 +10,7 @@
   const statusOf = m => m.display_state || m.state || 'pending';
   const monitorTypes = {
     http: 'Website', journey: 'Page journey', api: 'JSON API', dns: 'DNS record', ssl: 'SSL certificate',
-    domain: 'Domain expiry', ping: 'ICMP ping', tcp: 'TCP port', udp: 'UDP reply', heartbeat: 'Heartbeat'
+    domain: 'Domain expiry', ping: 'ICMP ping', tcp: 'TCP port', udp: 'UDP reply', smtp:'SMTP greeting', imap:'IMAP greeting', pop3:'POP3 greeting', ftp:'FTP greeting', sftp:'SSH / SFTP endpoint', email_health:'Email health', spf:'SPF record', dkim:'DKIM public key', dmarc:'DMARC policy', dnssec:'DNSSEC authenticated A', blacklist:'DNS blacklist (beta)', heartbeat: 'Heartbeat'
   };
 
   function counts() {
@@ -58,7 +58,7 @@
     const notice = window ? (state === 'maintenance' ? 'Ends ' + fmt(window.ends_at) : 'Planned ' + fmt(window.starts_at)) : '';
     const id = num(m.id);
     const heartbeat = m.kind === 'heartbeat';
-    const port = ['tcp', 'udp', 'ssl'].includes(m.kind) ? m.probe_config?.port : null;
+    const port = ['tcp', 'udp', 'ssl','smtp','imap','pop3','ftp','sftp'].includes(m.kind) ? m.probe_config?.port : null;
     const target = heartbeat ? 'Heartbeat · every ' + m.heartbeat_interval_s / 60 + ' min'
       : m.kind === 'http' ? m.url : monitorTypes[m.kind] + ' · ' + m.url + (port ? ':' + port : '');
     const timing = heartbeat
@@ -98,7 +98,8 @@
     domain: 'Confirm the registration expiry directly with your registrar.',
     ping: 'Check whether the host and its firewall respond to ICMP echo requests.',
     tcp: 'Check that the service is listening and the port is reachable from this network.',
-    udp: 'Check that the service replies to the configured request and that the reply prefix is correct.'
+    udp: 'Check that the service replies to the configured request and that the reply prefix is correct.',
+    smtp:'Check the mail server listener, greeting and TLS configuration.', imap:'Check the IMAP listener and TLS configuration.', pop3:'Check the POP3 listener and TLS configuration.', ftp:'Check the FTP listener and TLS configuration.', sftp:'Check the SSH listener; this does not test authenticated SFTP.', email_health:'Review MX and email authentication records at your DNS provider.', spf:'Review the published SPF record.', dkim:'Verify the configured selector and public key with your mail provider.', dmarc:'Review the DMARC TXT policy.', dnssec:'Check DNSSEC configuration with your DNS provider.', blacklist:'Verify the listing directly with the DNSBL provider.'
   };
 
   function investigatorHint(c, kind) {
@@ -468,6 +469,13 @@
       <p class="bn-note">Enter the registered domain, such as example.com. The registry needs to publish an expiry date.</p>`,
     ping: '<p class="bn-note">Sends an ICMP echo request. Some healthy services block ping.</p>',
     tcp: '<label>TCP port<input name="port" type="number" min="1" max="65535" required></label>',
+    ...Object.fromEntries(Object.entries({smtp:[25,587,465],imap:[143,993],pop3:[110,995],ftp:[21,990],sftp:[22]}).map(([kind,ports])=>[kind,'<label>Protocol port<select name="port">'+ports.map(p=>'<option>'+p+'</option>').join('')+'</select></label><p class="bn-note">Checks the public service greeting only. Implicit TLS ports verify the certificate. No authentication or data transfer.</p>'])),
+    email_health:'<label>DKIM selector (optional)<input name="selector" maxlength="63" placeholder="selector1"></label><p class="bn-note">Checks MX, SPF and DMARC together; optionally DKIM. Record presence is not a deliverability guarantee.</p>',
+    spf:'<p class="bn-note">Checks that exactly one SPF record is published.</p>',
+    dkim:'<label>DKIM selector<input name="selector" maxlength="63" required placeholder="selector1"></label><p class="bn-note">Checks the published public key for this selector.</p>',
+    dmarc:'<p class="bn-note">Checks the domain DMARC policy record.</p>',
+    dnssec:'<p class="bn-note">Checks for an authenticated A answer from a public validating resolver.</p>',
+    blacklist:'<label>DNS blacklist<select name="blacklist_list"><option value="spamhaus_zen">Spamhaus ZEN (hostname to IPv4)</option><option value="spamhaus_dbl">Spamhaus DBL (domain)</option></select></label><p class="bn-note">Operator enablement required. A negative or refused public-resolver answer is inconclusive.</p>',
     udp: `<label>UDP port<input name="port" type="number" min="1" max="65535" required></label>
       <label>Request bytes in hex<input name="payload" maxlength="384" placeholder="01020304" required></label>
       <label>Expected reply prefix in hex <small>(optional)</small><input name="response_prefix" maxlength="384" placeholder="01"></label>
