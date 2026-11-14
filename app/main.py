@@ -37,7 +37,7 @@ from .network_checks import (
     public_hostname, resolve_public, result as network_result,
 )
 
-from . import integrations, infrastructure, advanced_checks, browser_checks, teams
+from . import integrations, infrastructure, advanced_checks, browser_checks, teams, branding
 from .journeys import JourneyInput, JourneySettings, JourneyTrace, journey_origin, probe_journey
 
 ROOT = Path(__file__).resolve().parent
@@ -229,6 +229,7 @@ def init_db():
         infrastructure.init(c)
         browser_checks.init(c)
         teams.init(c)
+        branding.init(c)
         # Additive migration: preserve all pre-existing accounts and monitor history.
         columns={r['name'] for r in c.execute('PRAGMA table_info(users)')}
         if 'email_verified_at' not in columns:
@@ -1103,7 +1104,7 @@ def home():
 
 @app.get('/static/{filename}')
 def static(filename:str):
-    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js','outage-alarm.js','integrations.js','infrastructure.js','browser.js','teams.js'):raise HTTPException(404)
+    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js','outage-alarm.js','integrations.js','infrastructure.js','browser.js','teams.js','branding.js'):raise HTTPException(404)
     return FileResponse(ROOT/'static'/filename)
 
 
@@ -2112,6 +2113,171 @@ class StatusInput(BaseModel):
     title:str=Field(min_length=3,max_length=70)
 
 
+def brand_manager(c,actor,request):
+    return collaboration_scope(c,actor,request,('owner','admin'))
+
+
+@app.get('/api/branding/pages')
+def brand_pages(user=Depends(require_user)):
+    with db() as c:
+        return ([dict(r,kind='primary') for r in c.execute('SELECT id,title,slug FROM status_pages WHERE user_id=?',(user['id'],))]
+             + [dict(r,kind='client') for r in c.execute('SELECT id,title,slug FROM client_pages WHERE user_id=?',(user['id'],))])
+
+
+@app.get('/api/branding/{kind}/{pid}')
+def brand_details(kind:Literal['primary','client'],pid:int,user=Depends(require_user)):
+    with db() as c:
+        if user['workspace_role'] not in ('owner','admin'):
+            raise HTTPException(403,'Workspace manager required')
+        return branding.details(c,user['id'],kind,pid,user['plan'])
+
+
+@app.put('/api/branding/{kind}/{pid}')
+def brand_save(kind:Literal['primary','client'],pid:int,body:branding.BrandInput,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        owner=brand_manager(c,actor,request)
+        plan=c.execute('SELECT plan FROM users WHERE id=?',(owner,)).fetchone()[0]
+        branding.save(c,owner,kind,pid,body,plan)
+        teams.audit(c,owner,actor['id'],'Updated status page branding')
+    return {'ok':True}
+
+
+@app.post('/api/branding/{kind}/{pid}/announcements')
+def brand_announce(kind:Literal['primary','client'],pid:int,body:branding.AnnouncementInput,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        owner=brand_manager(c,actor,request)
+        _,b=branding.page(c,owner,kind,pid,True)
+        if c.execute('SELECT COUNT(*) FROM status_announcements WHERE brand_id=?',(b['id'],)).fetchone()[0]>=100:
+            raise HTTPException(403,'Announcement limit reached; remove an older announcement')
+        c.execute('INSERT INTO status_announcements(brand_id,title,body,kind,created_at) VALUES(?,?,?,?,?)',
+                  (b['id'],body.title.strip(),body.body.strip(),body.kind,int(time.time())))
+        teams.audit(c,owner,actor['id'],'Published status announcement')
+    return {'ok':True}
+
+
+@app.delete('/api/branding/{kind}/{pid}/announcements/{aid}')
+def brand_remove_announcement(kind:Literal['primary','client'],pid:int,aid:int,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        owner=brand_manager(c,actor,request)
+        _,b=branding.page(c,owner,kind,pid)
+        if not b or not c.execute('DELETE FROM status_announcements WHERE id=? AND brand_id=?',(aid,b['id'])).rowcount:
+            raise HTTPException(404,'Announcement not found')
+        teams.audit(c,owner,actor['id'],'Removed status announcement')
+    return {'ok':True}
+
+
+@app.post('/api/branding/{kind}/{pid}/domains')
+def brand_domain(kind:Literal['primary','client'],pid:int,body:branding.DomainInput,request:Request,actor=Depends(actor_csrf)):
+    try:
+        hostname=public_hostname(body.hostname)
+        if hostname=='beepnado.com' or hostname.endswith('.beepnado.com'):
+            raise ValueError('BeepNado hostnames are reserved')
+    except ValueError as exc:
+        raise HTTPException(422,str(exc)) from exc
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        owner=brand_manager(c,actor,request)
+        plan=c.execute('SELECT plan FROM users WHERE id=?',(owner,)).fetchone()[0]
+        result=branding.add_domain(c,owner,kind,pid,hostname,plan)
+        teams.audit(c,owner,actor['id'],'Registered custom status hostname')
+        return result
+
+
+async def verify_domain_txt(hostname,token):
+    from urllib.parse import urlencode
+    payload=await public_json('https://dns.google/resolve?'+urlencode({'name':'_beepnado.'+hostname,'type':'TXT'}))
+    return payload.get('Status')==0 and not payload.get('TC') and any(
+        a.get('type')==16 and str(a.get('data','')).strip('"')=='beepnado='+token for a in payload.get('Answer',[]))
+
+
+@app.post('/api/branding/{kind}/{pid}/domains/{did}/verify')
+async def brand_verify(kind:Literal['primary','client'],pid:int,did:int,request:Request,actor=Depends(actor_csrf)):
+    throttle(request,'status-domain-verify',str(actor['id']),15,600)
+    with db() as c:
+        owner=brand_manager(c,actor,request)
+        row=dict(branding.domain_owned(c,owner,kind,pid,did))
+    try:
+        valid=await verify_domain_txt(row['hostname'],row['token'])
+    except Exception:
+        raise HTTPException(503,'DNS lookup unavailable; retry later')
+    if not valid:
+        raise HTTPException(422,'Required DNS TXT record not found')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        owner=brand_manager(c,actor,request)
+        current=branding.domain_owned(c,owner,kind,pid,did)
+        if current['token']!=row['token']:
+            raise HTTPException(409,'Domain registration changed')
+        c.execute('UPDATE status_domains SET verified_at=? WHERE id=?',(int(time.time()),did))
+        teams.audit(c,owner,actor['id'],'Verified custom status hostname')
+    return {'ok':True}
+
+
+@app.delete('/api/branding/{kind}/{pid}/domains/{did}')
+def brand_delete_domain(kind:Literal['primary','client'],pid:int,did:int,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        owner=brand_manager(c,actor,request)
+        branding.domain_owned(c,owner,kind,pid,did)
+        c.execute('DELETE FROM status_domains WHERE id=?',(did,))
+        teams.audit(c,owner,actor['id'],'Removed custom status hostname')
+    return {'ok':True}
+
+
+@app.get('/custom-status')
+def branded_custom_status(request:Request):
+    # Only the explicitly configured reverse proxy may route this endpoint.
+    if not TRUSTED_PROXY_IP or not request.client or request.client.host!=TRUSTED_PROXY_IP:
+        raise HTTPException(404,'Status page unavailable')
+    hostname=request.headers.get('host','').lower()
+    with db() as c:
+        slug=branding.domain_target(c,hostname)
+    if not slug:raise HTTPException(404,'Status page unavailable')
+    return RedirectResponse('/s/'+slug,status_code=302)
+
+
+@app.post('/api/public-status/{slug}/subscribe')
+def status_subscribe(slug:str,body:branding.SubscriberInput,request:Request):
+    if not email_ready():raise HTTPException(503,'Email subscriptions unavailable')
+    throttle(request,'status-subscribe','*',10,3600)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        row=public_status_page(c,slug)
+        owner=row['user_id']
+        plan=c.execute('SELECT plan FROM users WHERE id=?',(owner,)).fetchone()[0]
+        pid=row['page_id'] or c.execute('SELECT id FROM status_pages WHERE user_id=?',(owner,)).fetchone()[0]
+        _,b=branding.page(c,owner,'client' if row['page_id'] else 'primary',pid,True)
+        token=branding.subscribe(c,b['id'],body.email,plan)
+        if token:
+            link=SITE_URL+'/#status-confirm='+token
+            c.execute('INSERT INTO email_outbox(recipient,subject,body,created_at,next_attempt) VALUES(?,?,?,?,?)',
+                      (body.email.strip().lower(),'Confirm BeepNado status subscription','Confirm your requested subscription: '+link,now(),int(time.time())))
+    return {'ok':True,'message':'If eligible, check your email for a confirmation link.'}
+
+
+@app.post('/api/status-subscription/confirm')
+def status_confirm(body:branding.SubscriberToken,request:Request):
+    throttle(request,'status-confirm','*',20,3600)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        email,token=branding.confirm(c,body.token)
+        link=SITE_URL+'/#status-unsubscribe='+token
+        c.execute('INSERT INTO email_outbox(recipient,subject,body,created_at,next_attempt) VALUES(?,?,?,?,?)',
+                  (email,'BeepNado status subscription confirmed','Your subscription is confirmed. Unsubscribe at any time: '+link,now(),int(time.time())))
+    return {'ok':True}
+
+
+@app.post('/api/status-subscription/unsubscribe')
+def status_unsubscribe(body:branding.SubscriberToken,request:Request):
+    throttle(request,'status-unsubscribe','*',30,3600)
+    with db() as c:
+        branding.unsubscribe(c,body.token)
+    return {'ok':True}
+
+
 class ClientPageInput(StatusInput):
     monitor_ids: set[int] = Field(min_length=1, max_length=max(PLAN_LIMITS.values()))
     published: bool = False
@@ -2248,6 +2414,7 @@ def status_page(slug: str, response: Response):
     with db() as c:
         c.execute('BEGIN')
         row = public_status_page(c, slug)
+        brand, announcements, _ = branding.public(c,row['user_id'],row['page_id'])
         scope = (row['user_id'], row['page_id'], row['page_id'])
         clock = now()
         windows = scheduled_maintenance(c, row['user_id'], clock)
@@ -2257,6 +2424,7 @@ def status_page(slug: str, response: Response):
             window = windows.get(monitor['id'])
             mons.append({
                 'name': monitor['name'],
+                'group': (c.execute('SELECT client_group FROM team_monitor_labels WHERE monitor_id=?',(monitor['id'],)).fetchone() or [''])[0],
                 'state': displayed_state(monitor, window, clock),
                 'last_checked': monitor['maintenance_last_checked'] or monitor['last_checked'],
                 'maintenance': {'starts_at': window['starts_at'], 'ends_at': window['ends_at']} if window else None,
@@ -2265,7 +2433,7 @@ def status_page(slug: str, response: Response):
             SELECT m.name AS monitor,i.opened_at,i.resolved_at
             FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE 1=1
         ''' + STATUS_MONITOR_SCOPE + ' ORDER BY i.id DESC LIMIT 5', scope)]
-    return {'title':row['title'],'monitors':mons,'incidents':incidents,'observed_at':clock,
+    return {'title':row['title'],'monitors':mons,'incidents':incidents,'observed_at':clock,'branding':brand,'announcements':announcements,
             'primary_connectivity_unverified': bool(egress_status and not egress_status[1])}
 
 
@@ -2290,7 +2458,9 @@ def public_badge(slug:str):
 @app.get('/s/{slug}')
 def status_html(slug:str):
     with db() as c:
-        public_status_page(c, slug)
+        row=public_status_page(c, slug)
+        _,_,b=branding.public(c,row['user_id'],row['page_id'])
+        if b: branding.record_view(c,b['id'])
     return FileResponse(ROOT/'static'/'index.html', headers={
         'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex',
     })
