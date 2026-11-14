@@ -1532,6 +1532,46 @@ def workspace_audit(user=Depends(require_user)):
         return [dict(r) for r in c.execute('SELECT a.action,a.created_at,u.email AS actor FROM team_audit a LEFT JOIN users u ON u.id=a.actor_id WHERE a.owner_id=? ORDER BY a.id DESC LIMIT 100',(user['id'],))]
 
 
+def collaboration_scope(c,actor,request,allowed):
+    user=teams.scope(c,actor,request.headers.get('x-workspace-id'))
+    if user['workspace_role'] not in allowed:
+        raise HTTPException(403,'Your workspace role cannot perform this action')
+    return user['id']
+
+
+@app.get('/api/team/incidents/{iid}')
+def team_incident(iid:int,user=Depends(require_user)):
+    with db() as c:
+        return teams.incident_collaboration(c,user['id'],iid)
+
+
+@app.post('/api/team/incidents/{iid}/notes')
+def team_note(iid:int,body:teams.NoteInput,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        owner=collaboration_scope(c,actor,request,('owner','admin','operator'))
+        teams.note(c,owner,actor['id'],iid,body.body)
+    return {'ok':True}
+
+
+@app.put('/api/team/incidents/{iid}/assignment')
+def team_assign(iid:int,body:teams.AssignmentInput,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        owner=collaboration_scope(c,actor,request,('owner','admin','operator'))
+        teams.assign(c,owner,actor['id'],iid,body.member_id)
+    return {'ok':True}
+
+
+@app.put('/api/team/monitors/{mid}/labels')
+def team_labels(mid:int,body:teams.LabelsInput,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        owner=collaboration_scope(c,actor,request,('owner','admin'))
+        teams.labels(c,owner,actor['id'],mid,body)
+    return {'ok':True}
+
+
 class ChannelInput(BaseModel):
     kind: Literal['slack','discord','telegram','teams','webhook']
     label: str = Field(min_length=1,max_length=60)
@@ -1671,7 +1711,7 @@ def alarm_incidents(user=Depends(require_user)):
 @app.get('/api/dashboard')
 def dashboard(user=Depends(require_user)):
     with db() as c:
-        monitors=[dict(r) for r in c.execute('SELECT * FROM monitors WHERE user_id=? ORDER BY id DESC',(user['id'],))]
+        monitors=[dict(r) for r in c.execute('SELECT m.*,COALESCE(l.client_group,\'\') AS client_group,COALESCE(l.tags,\'\') AS tags FROM monitors m LEFT JOIN team_monitor_labels l ON l.monitor_id=m.id WHERE m.user_id=? ORDER BY m.id DESC',(user['id'],))]
         checks=[dict(r) for r in c.execute('''SELECT ch.*,m.name monitor_name FROM checks ch JOIN monitors m ON m.id=ch.monitor_id WHERE m.user_id=? ORDER BY ch.id DESC LIMIT 150''',(user['id'],))]
         for check in checks:
             check['timings'] = json.loads(check['timings']) if check['timings'] else None
