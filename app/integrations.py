@@ -1,7 +1,5 @@
-"""Durable outbound incident notifications. Only fixed provider HTTPS endpoints are accepted."""
+"""Durable outbound incident notifications. Provider HTTPS endpoints and operator-enabled public webhooks."""
 import asyncio
-import hashlib
-import hmac
 import json
 import re
 import time
@@ -12,11 +10,11 @@ import h11
 
 def endpoint(kind, value):
     value = value.strip()
-    u = urlsplit(value)
     if kind == 'telegram':
-        if not re.fullmatch(r'[0-9]{5,20}:[A-Za-z0-9_-]{20,100}\\|(?:-?[0-9]{1,20}|@[A-Za-z0-9_]{5,32})',value):
+        if not re.fullmatch(r'[0-9]{5,20}:[A-Za-z0-9_-]{20,100}\|(?:-?[0-9]{1,20}|@[A-Za-z0-9_]{5,32})',value):
             raise ValueError('Enter bot token, a vertical bar, and chat ID')
         return value
+    u = urlsplit(value)
     if u.scheme != 'https' or u.username or u.password or u.port not in (None,443) or u.fragment or any(ord(ch)<33 or ord(ch)>126 for ch in value):
         raise ValueError('Use the provider HTTPS webhook URL without query parameters')
     if kind == 'webhook':
@@ -81,18 +79,19 @@ def enqueue(c, user_id, subject, body, monitor_id=None, incident_id=None, recove
         )))""",(subject,body,clock,clock,user_id,monitor_id,int(recovery),incident_id))
 
 
-def enqueue_escalations(c, site_url, now_iso):
+def enqueue_escalations(c, site_url, now_iso, active_sql):
     clock=int(time.time())
     rows=c.execute("""SELECT i.id incident_id,m.id monitor_id,m.name,a.id channel_id,i.opened_at
         FROM incidents i JOIN monitors m ON m.id=i.monitor_id
         JOIN users u ON u.id=m.user_id JOIN alert_channels a ON a.user_id=u.id
-        WHERE i.resolved_at IS NULL AND i.acknowledged_at IS NULL
+        WHERE m.id IN (SELECT m.id """ + active_sql + """) AND i.resolved_at IS NULL AND i.acknowledged_at IS NULL
         AND u.email_verified_at IS NOT NULL AND u.email_alerts_enabled=1
         AND m.enabled=1 AND m.state='down' AND a.delay_minutes>0
+        AND NOT EXISTS(SELECT 1 FROM maintenance_windows w WHERE w.monitor_id=m.id AND w.starts_at<=? AND w.ends_at>?)
         AND (a.monitor_id IS NULL OR a.monitor_id=m.id)
         AND unixepoch(i.opened_at)+a.delay_minutes*60<=?
         AND NOT EXISTS(SELECT 1 FROM escalations e WHERE e.incident_id=i.id AND e.channel_id=a.id)
-        LIMIT 100""",(clock,)).fetchall()
+        LIMIT 100""",(now_iso,now_iso,clock)).fetchall()
     for row in rows:
         # Mark once, in the same transaction as the queue insert.
         if c.execute('INSERT OR IGNORE INTO escalations VALUES(?,?)',(row['incident_id'],row['channel_id'])).rowcount:
@@ -119,7 +118,7 @@ async def deliver(row, validate_url):
     if row['kind']=='telegram':
         token,chat=url.split('|',1)
         url='https://api.telegram.org/bot'+token+'/sendMessage'
-        message={'chat_id':chat,'text':(row['subject']+'\\n'+row['body'])[:3500]}
+        message={'chat_id':chat,'text':(row['subject']+'\n'+row['body'])[:3500]}
     host, ip, port, path, scheme = await validate_url(url)
     data = json.dumps(message).encode()
     if row['kind']=='webhook' and os.getenv('ENABLE_GENERIC_WEBHOOKS','false').lower()!='true':
