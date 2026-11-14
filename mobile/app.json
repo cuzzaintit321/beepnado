@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "BeepNado",
+    "slug": "beepnado",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "scheme": "beepnado",
+    "ios": {
+      "bundleIdentifier": "com.rebootsyndicate.beepnado",
+      "supportsTablet": true
+    },
+    "android": {
+      "package": "com.rebootsyndicate.beepnado",
+      "allowBackup": false
+    },
+    "plugins": [
+      "expo-secure-store"
+    ]
+  }
+}
