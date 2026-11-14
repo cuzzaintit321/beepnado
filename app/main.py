@@ -44,6 +44,7 @@ ROOT = Path(__file__).resolve().parent
 DB_PATH = os.getenv('DATABASE_PATH', '/data/beepnado.sqlite3')
 SESSION_SECURE = os.getenv('SESSION_SECURE', 'true').lower() == 'true'
 WORKER_TOKEN = os.getenv('WORKER_TOKEN', '')
+CONFIRM_REGION = os.getenv('CONFIRM_REGION', '').strip().lower()
 SITE_URL = os.getenv('SITE_URL', 'http://localhost:8490').rstrip('/')
 REGISTRATION_ENABLED = os.getenv('REGISTRATION_ENABLED', 'false').lower() == 'true'
 MAX_USERS = max(1, min(int(os.getenv('MAX_USERS', '50')), 10000))
@@ -664,6 +665,15 @@ def record_check(monitor_id, result):
                          WHERE id=?''', (timestamp, monitor_id))
             return {'state': state, 'checked_at': timestamp, 'http_code': result['http_code'],
                     'response_ms': result['response_ms'], 'maintenance': True}
+        if CONFIRM_REGION and result['state']=='down':
+            # Require a fresh, matching remote observation. HTTP rule monitors are
+            # confirmed only by workers that explicitly attest the current revision.
+            cutoff=(datetime.now(timezone.utc)-timedelta(seconds=120)).isoformat(timespec='seconds')
+            remote=c.execute('SELECT state,checked_at,inconclusive,detail FROM checks WHERE monitor_id=? AND region=? AND checked_at>=? ORDER BY id DESC LIMIT 1',
+                             (monitor_id,CONFIRM_REGION,cutoff)).fetchone()
+            if not remote or remote['state']!='down' or remote['inconclusive'] or remote['detail']!=('Confirmed revision '+worker_revision(monitor)):
+                result=network_result(error='Awaiting independent outage confirmation',
+                                      detail='Primary check failed; matching fresh public evidence unavailable',unknown=True)
         return record_observation(c, monitor, result, 'primary', timestamp)
 
 
@@ -1988,16 +1998,21 @@ def reconcile_subscription(event, sub):
     return {'ok': True}
 
 
+def worker_revision(row):
+    return hashlib.sha256(json.dumps([row['url'],row['probe_kind'],row['probe_config'],row['required_phrase'],
+        row['expected_status'],row['max_response_ms']],separators=(',',':')).encode()).hexdigest()
+
+
 @app.get('/internal/targets')
 def remote_targets(request:Request, typed: bool = False, journeys: bool = False):
     if not WORKER_TOKEN or len(WORKER_TOKEN)<32 or not hmac.compare_digest(request.headers.get('x-worker-token',''),WORKER_TOKEN):
         raise HTTPException(401,'Worker not authorized')
     with db() as c:
-        rows = c.execute('SELECT m.id,m.url,m.probe_kind,m.probe_config ' + ACTIVE_MONITORS +
+        rows = c.execute('SELECT m.id,m.url,m.probe_kind,m.probe_config,m.required_phrase,m.expected_status,m.max_response_ms ' + ACTIVE_MONITORS +
                          ' AND m.heartbeat_interval_s IS NULL')
         if typed:
             targets = [{'id': row['id'], 'url': row['url'], 'kind': row['probe_kind'],
-                        'config': json.loads(row['probe_config'])} for row in rows
+                        'config': json.loads(row['probe_config']), 'rules': {'required_phrase':row['required_phrase'],'expected_status':row['expected_status'],'max_response_ms':row['max_response_ms']}, 'revision': worker_revision(row)} for row in rows
                        if journeys or row['probe_kind'] != 'journey']
         else:
             targets = [{'id': row['id'], 'url': row['url']} for row in rows if row['probe_kind'] == 'http']
@@ -2014,6 +2029,37 @@ class WorkerResult(BaseModel):
     error:str|None=None
     detail:str|None=Field(default=None,max_length=250)
     journey_trace:JourneyTrace|None=None
+    revision:str|None=Field(default=None,pattern=r'^[0-9a-f]{64}
+
+
+@app.post('/internal/result')
+def remote_result(item:WorkerResult,request:Request):
+    if not WORKER_TOKEN or len(WORKER_TOKEN)<32 or not hmac.compare_digest(request.headers.get('x-worker-token',''),WORKER_TOKEN):
+        raise HTTPException(401,'Worker not authorized')
+    if item.state not in ('up','down','unknown') or item.region in ('primary', 'maintenance', 'heartbeat'):raise HTTPException(422,'Invalid result')
+    # Keep the external observation separate from primary incident state.
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        monitor = c.execute('SELECT m.* ' + ACTIVE_MONITORS +
+                            ' AND m.id=? AND m.heartbeat_interval_s IS NULL', (item.monitor_id,)).fetchone()
+        if not monitor:
+            raise HTTPException(404)
+        if monitor['probe_kind'] == 'journey':
+            revision = json.loads(monitor['probe_config'])['revision']
+            if not item.journey_trace or item.journey_trace.revision != revision:
+                raise HTTPException(409, 'Journey settings changed. Fetch the current targets.')
+        elif item.journey_trace:
+            raise HTTPException(422, 'Journey evidence requires a journey monitor')
+        if item.revision and not hmac.compare_digest(item.revision,worker_revision(monitor)):
+            raise HTTPException(409,'Monitor configuration changed')
+        result = item.model_dump()
+        if item.revision and item.state=='down':
+            result['detail']='Confirmed revision '+item.revision
+        result['error'] = (item.error or '')[:100]
+        state = 'degraded' if item.state == 'unknown' else item.state
+        store_check(c, item.monitor_id, item.region, now(), state, result)
+    return {'ok':True}
+)
 
 
 @app.post('/internal/result')
