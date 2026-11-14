@@ -5,6 +5,9 @@ import re
 import time
 import json
 import os
+import base64
+import binascii
+import struct
 from typing import Literal
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -21,6 +24,7 @@ class BrandInput(BaseModel):
     hide_brand:bool=False
     footer:str=Field(default='',max_length=250)
     logo_text:str=Field(default='',max_length=8)
+    show_groups:bool=False
 
 class AnnouncementInput(BaseModel):
     title:str=Field(min_length=3,max_length=100,pattern=r'\S')
@@ -72,6 +76,10 @@ def init(c):
         UNIQUE(announcement_id,subscriber_id)
     );
     """)
+    columns={r[1] for r in c.execute("PRAGMA table_info(status_branding)")}
+    for name in ('logo_png','favicon_png'):
+        if name not in columns:
+            c.execute(f'ALTER TABLE status_branding ADD COLUMN {name} BLOB')
     if "unsubscribe_token" not in {r[1] for r in c.execute("PRAGMA table_info(status_subscribers)")}:
         c.execute("ALTER TABLE status_subscribers ADD COLUMN unsubscribe_token TEXT")
 
@@ -104,12 +112,16 @@ def public(c,owner,client_id):
         row=c.execute('SELECT * FROM status_branding WHERE client_id=?',(client_id,)).fetchone()
     plan=c.execute('SELECT plan FROM users WHERE id=?',(owner,)).fetchone()[0]
     data=effective(json.loads(row['config']) if row else {},plan)
+    data['has_logo']=bool(row and row['logo_png'] and plan!='free')
+    data['has_favicon']=bool(row and row['favicon_png'] and plan!='free')
     announcements=[dict(x) for x in c.execute('SELECT title,body,kind,created_at FROM status_announcements WHERE brand_id=? ORDER BY id DESC LIMIT 10',(row['id'],))] if row else []
     return data,announcements,row
 
 def details(c,owner,kind,pid,plan):
     p,b=page(c,owner,kind,pid)
     result={'page':dict(p),'branding':effective(json.loads(b['config']) if b else {},plan),'announcements':[],'domains':[],'subscribers':0,'views':[]}
+    result['branding']['has_logo']=bool(b and b['logo_png'] and plan!='free')
+    result['branding']['has_favicon']=bool(b and b['favicon_png'] and plan!='free')
     if b:
         result['announcements']=[dict(x) for x in c.execute('SELECT id,title,body,kind,created_at FROM status_announcements WHERE brand_id=? ORDER BY id DESC LIMIT 50',(b['id'],))]
         result['domains']=[dict(x) for x in c.execute('SELECT id,hostname,token,verified_at,activated_at FROM status_domains WHERE brand_id=? ORDER BY id',(b['id'],))]
@@ -199,3 +211,30 @@ def mail_batch(c,site_url):
     return [dict(r,subject='Status update: '+r['title'].replace('\r',' ').replace('\n',' '),
                  message=r['page_title']+'\n\n'+r['body']+'\n\nStatus page: '+site_url+'/s/'+r['slug']+
                  '\nUnsubscribe: '+site_url+'/#status-unsubscribe='+r['unsubscribe_token']) for r in rows]
+
+
+class ImageInput(BaseModel):
+    png:str=Field(default='',max_length=56000)
+
+
+def decode_image(data,kind):
+    if not data:return None
+    try:
+        raw=base64.b64decode(data,validate=True)
+        if len(raw)>40000 or len(raw)<33 or raw[:8]!=b'\x89PNG\r\n\x1a\n' or raw[12:16]!=b'IHDR' or raw[-8:-4]!=b'IEND':
+            raise ValueError('Invalid PNG')
+        w,h=struct.unpack('>II',raw[16:24])
+        limit=64 if kind=='favicon' else 512
+        if not 1<=w<=limit or not 1<=h<=limit:
+            raise ValueError('Image dimensions exceed limit')
+        return raw
+    except (ValueError,binascii.Error,struct.error):
+        raise HTTPException(422,'Use a valid PNG up to 40 KB within the permitted image dimensions') from None
+
+
+def save_image(c,owner,kind,pid,image_kind,body,plan):
+    if plan=='free':raise HTTPException(403,'Custom images require a paid plan')
+    raw=decode_image(body.png,image_kind)
+    _,b=page(c,owner,kind,pid,True)
+    column='logo_png' if image_kind=='logo' else 'favicon_png'
+    c.execute(f'UPDATE status_branding SET {column}=? WHERE id=?',(raw,b['id']))
