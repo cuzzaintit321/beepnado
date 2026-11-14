@@ -76,12 +76,44 @@ def collect(config,previous):
                     state=json.loads(output)
                     containers.append({'name':name,'state':state.get('Status','unknown'),'health':(state.get('Health') or {}).get('Status')})
                 except (ValueError,AttributeError):
+                    containers.append({'name':name,'state':'unknown'})
+            else:
+                containers.append({'name':name,'state':'unknown'})
+    processes=[]
+    names=set()
+    if config.get('processes'):
+        for entry in Path('/proc').iterdir():
+            if entry.name.isdigit():
+                try:
+                    names.add((entry/'comm').read_text().strip())
+                except OSError:
                     pass
+        for name in config['processes'][:32]:
+            if isinstance(name,str) and re.fullmatch(r'[A-Za-z0-9_.-]{1,120}',name):
+                processes.append({'name':name,'state':'active' if name in names else 'inactive'})
+    temperatures=[]
+    for sensor in Path('/sys/class/hwmon').glob('hwmon*/temp*_input'):
+        try:
+            value=int(sensor.read_text())/1000
+            if -100<=value<=250:
+                temperatures.append(value)
+        except (OSError,ValueError):
+            pass
+    counters={'network_rx_bytes':rx,'network_tx_bytes':tx,'disk_read_bytes':read,'disk_write_bytes':write}
+    clock=time.monotonic()
+    last=previous.get('counters')
+    rates={}
+    if last and clock>last[0]:
+        for key,value in counters.items():
+            if value>=last[1][key]:
+                rates[key.replace('_bytes','_bps')]=round((value-last[1][key])/(clock-last[0]),2)
+    previous['counters']=(clock,counters)
     return {'platform':'linux','hostname':socket.gethostname()[:120],'cpu_percent':cpu,
             'memory_percent':max(0,min(100,memory)),'swap_percent':swap,'cpu_count':os.cpu_count() or 1,
             'uptime_seconds':int(float(proc('uptime').split()[0])),'load1':os.getloadavg()[0],
             'network_rx_bytes':rx,'network_tx_bytes':tx,'disk_read_bytes':read,'disk_write_bytes':write,
-            'disks':disks,'services':services,'containers':containers}
+            'disks':disks,'services':services,'containers':containers,'processes':processes,
+            'temperature_c':max(temperatures) if temperatures else None,**rates}
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
