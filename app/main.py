@@ -63,9 +63,27 @@ STRIPE_LIVE_MODE = STRIPE_KEY.startswith(('sk_live_', 'rk_live_'))
 STRIPE_LIVE_CHECKOUT_ENABLED = os.getenv('STRIPE_LIVE_CHECKOUT_ENABLED', '').lower() == 'true'
 STRIPE_PORTAL_CONFIGURATION = os.getenv('STRIPE_PORTAL_CONFIGURATION', '')
 LIVE_WEBHOOK_LOCK = asyncio.Lock()
+# Legacy price IDs remain recognized for existing subscriptions only.
 PRICE_IDS = {'pro': os.getenv('STRIPE_PRICE_PRO',''), 'team': os.getenv('STRIPE_PRICE_TEAM','')}
-PLAN_LIMITS = {'free': 2, 'pro': 20, 'team': 100}
-PLAN_INTERVALS = {'free': 300, 'pro': 60, 'team': 30}
+PLAN_LIMITS = {'free': 50, 'pro': 50, 'team': 150, 'scale': 300}
+PLAN_INTERVALS = {'free': 300, 'pro': 60, 'team': 30, 'scale': 15}
+PLAN_MONTHLY = {'free': 0, 'pro': 9, 'team': 29, 'scale': 59}
+NEW_PRICE_IDS = {(plan,cycle): os.getenv(f'STRIPE_PRICE_{plan.upper()}_{cycle.upper()}','')
+                 for plan in ('pro','team','scale') for cycle in ('month','year')}
+
+def price_mapping():
+    result={price:plan for plan,price in PRICE_IDS.items() if price}
+    for (plan,cycle),price in NEW_PRICE_IDS.items():
+        if price:
+            if price in result and result[price]!=plan:
+                raise ValueError('Stripe price is assigned to multiple plans')
+            result[price]=plan
+    return result
+
+def pricing_catalog():
+    return [{'id':p,'monthly':PLAN_MONTHLY[p],'annual':PLAN_MONTHLY[p]*10,
+             'monitors':PLAN_LIMITS[p],'interval_seconds':PLAN_INTERVALS[p]}
+            for p in PLAN_LIMITS]
 # Keep the oldest monitors active on downgrade. Later upgrades restore capacity
 # automatically because this filter leaves monitor rows and history intact.
 MONITOR_PLAN_LIMIT = 'CASE u.plan ' + ' '.join(
@@ -986,7 +1004,7 @@ async def headers(request: Request, call_next):
 
 
 def billing_account_allowed(user):
-    if not (STRIPE_SIGNING and all(PRICE_IDS.values())):
+    if not (STRIPE_SIGNING and (any(PRICE_IDS.values()) or any(NEW_PRICE_IDS.values()))):
         return False
     if STRIPE_LIVE_MODE:
         return bool(STRIPE_PORTAL_CONFIGURATION)
@@ -1001,8 +1019,13 @@ def billing_allowed(user):
 @app.get('/api/availability')
 def public_availability(request: Request):
     # Test checkout is only advertised to the configured, signed-in test account.
+    user=session_user(request)
+    allowed=billing_allowed(user)
     return {'free_registration': bool(REGISTRATION_ENABLED and email_ready()),
-            'billing': billing_allowed(session_user(request)),
+            'billing': allowed,
+            'billing_portal': bool(user and user.get('stripe_customer') and billing_account_allowed(user)),
+            'checkout_options': [f'{p}:{c}' for (p,c),price in NEW_PRICE_IDS.items() if allowed and price],
+            'plans': pricing_catalog(),
             'email': email_ready()}
 
 
@@ -1997,6 +2020,7 @@ def get_stripe():
 
 class CheckoutInput(BaseModel):
     plan:str
+    cycle:Literal['month','year']='month'
 
 
 def checkout_attempt(user_id, plan):
@@ -2025,14 +2049,23 @@ def checkout_attempt(user_id, plan):
         return dict(user), dict(attempt)
 
 
-def checkout_session(stripe, user_id, plan):
+def checkout_session(stripe, user_id, plan, cycle='month'):
+    price_id=NEW_PRICE_IDS.get((plan,cycle))
+    if not price_id:
+        raise HTTPException(503,'This billing option is not configured')
+    price=stripe.Price.retrieve(price_id)
+    recurring=price.get('recurring') or {}
+    expected=PLAN_MONTHLY[plan]*(10 if cycle=='year' else 1)*100
+    if not price.get('active') or price.get('currency')!='usd' or price.get('unit_amount')!=expected or recurring.get('interval')!=cycle or recurring.get('interval_count')!=1 or price.get('livemode')!=STRIPE_LIVE_MODE:
+        raise HTTPException(503,'Stripe price does not match the published plan')
+    selection=f'{plan}:{cycle}:{price_id}'
     while True:
-        user, attempt = checkout_attempt(user_id, plan)
+        user, attempt = checkout_attempt(user_id, selection)
         if not attempt['session_id']:
             break
         session = stripe.checkout.Session.retrieve(attempt['session_id'])
         if session.status == 'open':
-            if attempt['plan'] == plan:
+            if attempt['plan'] == selection:
                 return session.url
             session = stripe.checkout.Session.expire(attempt['session_id'])
         completed_and_canceled = (
@@ -2044,13 +2077,13 @@ def checkout_session(stripe, user_id, plan):
         with db() as c:
             c.execute('DELETE FROM billing_checkout WHERE request_key=?', (attempt['request_key'],))
 
-    if attempt['plan'] != plan:
+    if attempt['plan'] != selection:
         raise HTTPException(409, 'Retry the plan you selected first.')
     if time.time() - attempt['created_at'] >= 23 * 3600:
         raise HTTPException(409, 'This checkout attempt needs support before it can be retried.')
     params = {
         'mode': 'subscription',
-        'line_items': [{'price': PRICE_IDS[plan], 'quantity': 1}],
+        'line_items': [{'price': price_id, 'quantity': 1}],
         'success_url': SITE_URL + '/?billing=return',
         'cancel_url': SITE_URL + '/?billing=cancel',
         'client_reference_id': str(user_id),
@@ -2073,11 +2106,11 @@ def checkout_session(stripe, user_id, plan):
 def checkout(input: CheckoutInput, user=Depends(require_csrf)):
     if not billing_allowed(user):
         raise HTTPException(503, 'Paid checkout is unavailable')
-    if input.plan not in ('pro', 'team'):
+    if input.plan not in ('pro', 'team', 'scale'):
         raise HTTPException(422, 'Unknown paid plan')
     stripe = get_stripe()
     try:
-        return {'url': checkout_session(stripe, user['id'], input.plan)}
+        return {'url': checkout_session(stripe, user['id'], input.plan, input.cycle)}
     except HTTPException:
         raise
     except Exception as exc:
@@ -2149,7 +2182,7 @@ def reconcile_subscription(event, sub):
     uid = (sub.get('metadata') or {}).get('beepnado_user_id')
     items = (sub.get('items') or {}).get('data', [])
     price = (items[0].get('price') or {}).get('id') if len(items) == 1 else None
-    plan = next((name for name, price_id in PRICE_IDS.items() if price_id and price_id == price), None)
+    plan = price_mapping().get(price)
     status = 'canceled' if event['type'] == 'customer.subscription.deleted' else sub.get('status')
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
