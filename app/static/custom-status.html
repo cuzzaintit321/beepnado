@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BeepNado Workspace</title>
+<meta name="description" content="Sign in to your BeepNado monitoring workspace.">
+
+<meta name="theme-color" content="#14112b">
+<link rel="stylesheet" href="/static/site.css?v=4"><link rel="stylesheet" href="/static/experience.css"><link rel="stylesheet" href="/static/monitor-theme.css?v=6"><script src="/static/app.js?v=10" defer></script><script src="/static/branding.js" defer></script>
+</head><body data-custom-status="true">
+<div class="shell" id="shell">
+<p id="app-loading" class="app-loading" role="status">Opening BeepNado…</p>
+<noscript><p>BeepNado requires JavaScript. <a href="https://beepnado.com/">Visit the BeepNado website</a>.</p></noscript>
+<section id="account-screen" class="account-screen hidden"><div class="account-card"><a class="go-back" href="https://beepnado.com/">← BeepNado website</a><div class="account-logo">◉ beep<span>nado.</span></div><h2 id="account-title">Sign in</h2><p id="account-subtitle">Open your monitoring workspace.</p><form id="account-form"><label>Email address<input id="account-email" type="email" placeholder="you@company.com" required autocomplete="email" maxlength="160"></label><label>Password<input id="account-password" type="password" placeholder="At least 12 characters" required minlength="12" autocomplete="new-password" maxlength="200"></label><button class="btn btn-accent" type="submit" id="account-submit">Sign in ↗</button></form><button class="swap-auth" id="account-swap">Already have an account? Sign in</button><button class="swap-auth" id="account-forgot" type="button">Forgot your password?</button><button class="swap-auth" id="account-resend" type="button">Resend verification email</button><p class="error-line" id="account-error" role="alert"></p><p class="auth-success" id="account-success" role="status" aria-live="polite"></p></div></section>
+<section class="workspace hidden" id="workspace"><aside class="workspace-side"><a href="https://beepnado.com/" class="brand" aria-label="BeepNado homepage"><span class="symbol symbol-storm" aria-hidden="true"><svg viewBox="0 0 42 42" fill="none"><path d="M4 9h32M9 16h24M13 23h17M17 30h9" stroke="currentColor" stroke-width="5" stroke-linecap="round"/><path d="M24 33l-4 5" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/></svg></span><span>beep<span class="brand-accent">nado</span><span class="brand-dot">.</span></span></a><div class="side-label">YOUR WORKSPACE</div><button class="side-link active" data-view="overview">▦ &nbsp; Overview</button><button class="side-link" data-view="monitors">◉ &nbsp; Monitors</button><button class="side-link" data-view="incidents">⚑ &nbsp; Incidents</button><button class="side-link" data-view="alerts">⚡ &nbsp; Alert feed</button><button class="side-link" data-view="browser">▧ &nbsp; Browser monitoring</button><button class="side-link" data-view="infrastructure">▣ &nbsp; Infrastructure</button><button class="side-link" data-view="integrations">⚙ &nbsp; Integrations</button><button class="side-link" data-view="branding">✦ &nbsp; Status branding</button><button class="side-link" data-view="status">↗ &nbsp; Status page</button><button class="side-link" data-view="clients">▤ &nbsp; Client pages</button><button class="side-link" data-view="teams">♙ &nbsp; Team workspace</button><button class="side-link" data-view="billing">◇ &nbsp; Plan & billing</button><div class="side-foot"><span>● PRIMARY REGION ACTIVE</span><p>Real checks, real incidents, no fake data.</p><button id="signout" class="logout">Sign out ↗</button></div></aside><div class="workspace-main"><div class="workspace-head"><div><span class="work-eyebrow">OPERATIONS / <span id="view-crumb">OVERVIEW</span></span><h2 id="view-heading">Good to see you.</h2></div><span class="user-chip" id="user-chip">Signed in</span></div><section id="outage-alarm" class="panel bn-alarm" aria-labelledby="outage-alarm-title" hidden>
+  <div class="bn-alarm-toolbar">
+    <div><h3 id="outage-alarm-title">Outage alerts</h3><p id="outage-alarm-state" role="status">Loading alert protection…</p></div>
+    <div class="bn-alarm-actions">
+      <button class="bn-btn bn-btn-primary bn-btn-small" type="button" id="outage-alarm-toggle" disabled>Arm</button>
+    </div>
+  </div>
+  <div class="bn-alarm-banner" id="outage-alarm-banner" hidden>
+    <p id="outage-alarm-summary" role="status"></p><ul id="outage-alarm-incidents"></ul>
+  </div>
+</section>
+<div id="work-content"></div></div></section>
+<section class="public-status hidden" id="public-status"><div class="status-bar"><a href="/" class="brand"><span class="symbol symbol-storm" aria-hidden="true"><svg viewBox="0 0 42 42" fill="none"><path d="M4 9h32M9 16h24M13 23h17M17 30h9" stroke="currentColor" stroke-width="5" stroke-linecap="round"/><path d="M24 33l-4 5" stroke="currentColor" stroke-width="3.2" stroke-linecap="round"/></svg></span><span>beep<span class="brand-accent">nado</span><span class="brand-dot">.</span></span></a><span>Public service status</span></div><div class="status-body" id="status-body"></div></section>
+<div class="toast" id="toast" role="status"></div>
+</div></body></html>
