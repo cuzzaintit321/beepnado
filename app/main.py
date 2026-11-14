@@ -37,7 +37,7 @@ from .network_checks import (
     public_hostname, resolve_public, result as network_result,
 )
 
-from . import integrations, infrastructure, advanced_checks, browser_checks
+from . import integrations, infrastructure, advanced_checks, browser_checks, teams
 from .journeys import JourneyInput, JourneySettings, JourneyTrace, journey_origin, probe_journey
 
 ROOT = Path(__file__).resolve().parent
@@ -228,6 +228,7 @@ def init_db():
         integrations.init(c)
         infrastructure.init(c)
         browser_checks.init(c)
+        teams.init(c)
         # Additive migration: preserve all pre-existing accounts and monitor history.
         columns={r['name'] for r in c.execute('PRAGMA table_info(users)')}
         if 'email_verified_at' not in columns:
@@ -395,7 +396,7 @@ def session_user(request: Request):
     return dict(row) if row else None
 
 
-def require_user(request: Request):
+def require_actor(request: Request):
     user = session_user(request)
     if not user:
         raise HTTPException(401, 'Sign in to continue')
@@ -404,10 +405,30 @@ def require_user(request: Request):
     return user
 
 
+def require_user(request: Request):
+    actor=require_actor(request)
+    requested=request.headers.get('x-workspace-id')
+    # Image tags cannot attach headers; only this private GET supports explicit scope in its query.
+    if not requested and request.method=='GET' and re.fullmatch(r'/api/browser/[0-9]+/image/[0-9]+',request.url.path):
+        requested=request.query_params.get('workspace')
+    with db() as c:
+        user=teams.scope(c,actor,requested)
+    request.state.workspace_user=user
+    return user
+
+
+def actor_csrf(request:Request,actor=Depends(require_actor)):
+    if not hmac.compare_digest(request.headers.get('x-csrf-token',''),actor['csrf']):
+        raise HTTPException(403,'Invalid CSRF token')
+    return actor
+
+
 def require_csrf(request: Request, user=Depends(require_user)):
     token = request.headers.get('x-csrf-token', '')
     if not hmac.compare_digest(token, user['csrf']):
         raise HTTPException(403, 'Invalid CSRF token')
+    if not teams.can_write(user['workspace_role'],request.method,request.url.path):
+        raise HTTPException(403,'Your workspace role cannot perform this action')
     return user
 
 
@@ -1005,6 +1026,13 @@ async def headers(request: Request, call_next):
         elif request.headers.get('sec-fetch-site')=='cross-site':
             return JSONResponse({'detail':'Cross-site request denied'},status_code=403)
     response=await call_next(request)
+    scoped=getattr(request.state,'workspace_user',None)
+    if scoped and request.method in ('POST','PUT','PATCH','DELETE') and response.status_code<300 and not request.url.path.startswith('/api/team/'):
+        try:
+            with db() as c:
+                teams.audit(c,scoped['workspace_id'],scoped['actor_id'],request.method+' '+request.url.path)
+        except Exception:
+            print('Workspace audit write failed',flush=True)
     response.headers.update({'X-Content-Type-Options':'nosniff','X-Frame-Options':'DENY','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",'Cache-Control':'no-store'})
     return response
 
@@ -1026,10 +1054,13 @@ def billing_allowed(user):
 def public_availability(request: Request):
     # Test checkout is only advertised to the configured, signed-in test account.
     user=session_user(request)
-    allowed=billing_allowed(user)
+    if user and user.get('email_verified_at'):
+        user=require_user(request)
+    owner=bool(user and user.get('workspace_role')=='owner')
+    allowed=owner and billing_allowed(user)
     return {'free_registration': bool(REGISTRATION_ENABLED and email_ready()),
             'billing': allowed,
-            'billing_portal': bool(user and user.get('stripe_customer') and billing_account_allowed(user)),
+            'billing_portal': bool(owner and user.get('stripe_customer') and billing_account_allowed(user)),
             'checkout_options': [f'{p}:{c}' for (p,c),price in NEW_PRICE_IDS.items() if allowed and price],
             'plans': pricing_catalog(),
             'email': email_ready()}
@@ -1072,7 +1103,7 @@ def home():
 
 @app.get('/static/{filename}')
 def static(filename:str):
-    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js','outage-alarm.js','integrations.js','infrastructure.js','browser.js'):raise HTTPException(404)
+    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js','outage-alarm.js','integrations.js','infrastructure.js','browser.js','teams.js'):raise HTTPException(404)
     return FileResponse(ROOT/'static'/filename)
 
 
@@ -1211,7 +1242,7 @@ def reset_password(input:ResetInput,request:Request):
 
 
 @app.post('/api/logout')
-def logout(request:Request,response:Response,user=Depends(require_csrf)):
+def logout(request:Request,response:Response,user=Depends(actor_csrf)):
     token=session_token(request)
     with db() as c:c.execute('DELETE FROM sessions WHERE token_hash=?',(hashlib.sha256(token.encode()).hexdigest(),))
     response.delete_cookie(COOKIE,path='/')
@@ -1221,6 +1252,8 @@ def logout(request:Request,response:Response,user=Depends(require_csrf)):
 @app.get('/api/me')
 def me(request:Request):
     user=session_user(request)
+    if user and user.get('email_verified_at'):
+        user=require_user(request)
     return {'signed_in':bool(user and user.get('email_verified_at')),'user':user if user and user.get('email_verified_at') else None,
             'plans':{p:{'monitors':PLAN_LIMITS[p],'interval':PLAN_INTERVALS[p]} for p in PLAN_LIMITS}}
 
@@ -1410,6 +1443,95 @@ async def browser_result(request:Request):
         return browser_checks.submit(c,body)
 
 
+@app.get('/api/team/workspaces')
+def workspace_list(actor=Depends(require_actor)):
+    with db() as c:
+        return teams.workspaces(c,actor)
+
+
+@app.get('/api/team/roster')
+def workspace_roster(user=Depends(require_user)):
+    with db() as c:
+        return teams.roster(c,user['id'],user['actor_id'])
+
+
+@app.put('/api/team/name')
+def workspace_rename(body:teams.WorkspaceInput,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        user=teams.scope(c,actor,request.headers.get('x-workspace-id'))
+        if user['workspace_role']!='owner':
+            raise HTTPException(403,'Only the owner can rename the workspace')
+        c.execute('INSERT INTO team_workspaces(owner_id,name) VALUES(?,?) ON CONFLICT(owner_id) DO UPDATE SET name=excluded.name',
+                  (user['id'],body.name.strip()))
+        teams.audit(c,user['id'],actor['id'],'Renamed workspace')
+    return {'ok':True}
+
+
+@app.post('/api/team/invite')
+def workspace_invite(body:teams.InviteInput,request:Request,actor=Depends(actor_csrf)):
+    throttle(request,'team-invite',str(actor['id']),10,3600)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        user=teams.scope(c,actor,request.headers.get('x-workspace-id'))
+        token,email=teams.invite(c,user['id'],actor['id'],body)
+        link=SITE_URL+'/#invite='+token
+        queued=False
+        if email_ready():
+            c.execute('INSERT INTO email_outbox(recipient,subject,body,created_at,next_attempt) VALUES(?,?,?,?,?)',
+                      (email,'BeepNado workspace invitation','You have been invited to a BeepNado workspace. Sign in with this email address and accept within 72 hours: '+link,now(),int(time.time())))
+            queued=True
+    return {'link':link,'email_queued':queued}
+
+
+@app.post('/api/team/accept')
+def workspace_accept(body:teams.AcceptInput,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        return {'workspace_id':teams.accept(c,actor,body.token)}
+
+
+@app.patch('/api/team/members/{member_id}')
+def workspace_role(member_id:int,body:teams.RoleInput,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        user=teams.scope(c,actor,request.headers.get('x-workspace-id'))
+        teams.change_member(c,user['id'],actor['id'],member_id,body.role)
+    return {'ok':True}
+
+
+@app.delete('/api/team/members/{member_id}')
+def workspace_remove(member_id:int,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        user=teams.scope(c,actor,request.headers.get('x-workspace-id'))
+        teams.change_member(c,user['id'],actor['id'],member_id)
+    return {'ok':True}
+
+
+@app.delete('/api/team/invites/{invite_id}')
+def workspace_revoke_invite(invite_id:int,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        user=teams.scope(c,actor,request.headers.get('x-workspace-id'))
+        role=teams.manager(c,user['id'],actor['id'])
+        row=c.execute('SELECT role FROM team_invites WHERE id=? AND owner_id=?',(invite_id,user['id'])).fetchone()
+        if not row:
+            raise HTTPException(404,'Invitation not found')
+        if role=='admin' and row['role']=='admin':
+            raise HTTPException(403,'Only the owner can revoke admin invitations')
+        c.execute('DELETE FROM team_invites WHERE id=?',(invite_id,))
+        teams.audit(c,user['id'],actor['id'],'Revoked invitation')
+    return {'ok':True}
+
+
+@app.get('/api/team/audit')
+def workspace_audit(user=Depends(require_user)):
+    with db() as c:
+        teams.manager(c,user['id'],user['actor_id'])
+        return [dict(r) for r in c.execute('SELECT a.action,a.created_at,u.email AS actor FROM team_audit a LEFT JOIN users u ON u.id=a.actor_id WHERE a.owner_id=? ORDER BY a.id DESC LIMIT 100',(user['id'],))]
+
+
 class ChannelInput(BaseModel):
     kind: Literal['slack','discord','telegram','teams','webhook']
     label: str = Field(min_length=1,max_length=60)
@@ -1506,7 +1628,10 @@ def alarm_settings(user_id):
 
 @app.get('/api/alarm-settings')
 def get_alarm_settings(user=Depends(require_user)):
-    return alarm_settings(user['id'])
+    result=alarm_settings(user['id'])
+    if user['workspace_role']!='owner':
+        result.pop('email',None)
+    return result
 
 
 @app.put('/api/alarm-settings')
