@@ -143,6 +143,7 @@ async function renderPublicStatus(slug){
    const maintenance=s.monitors.some(m=>m.state==='maintenance');
    const pending=s.monitors.some(m=>!['up','maintenance'].includes(m.state));
    const message=!s.monitors.length?'◌ No services currently listed':bad?'● One or more services are currently reporting downtime'
+     :s.primary_connectivity_unverified?'◌ Monitoring temporarily unavailable — service health cannot be verified'
      :maintenance?'◌ Planned maintenance is in progress'
      :pending?'◌ Some services have not confirmed a healthy state':'✓ All monitored services are operational';
    const rows = s.monitors.map(m => {
