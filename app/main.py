@@ -2316,6 +2316,11 @@ def status_subscribe(slug:str,body:branding.SubscriberInput,request:Request):
     return {'ok':True,'message':'If eligible, check your email for a confirmation link.'}
 
 
+@app.post('/api/custom-status/subscribe')
+def custom_subscribe(body:branding.SubscriberInput,request:Request):
+    return status_subscribe(custom_status_slug(request),body,request)
+
+
 @app.post('/api/status-subscription/confirm')
 def status_confirm(body:branding.SubscriberToken,request:Request):
     throttle(request,'status-confirm','*',20,3600)
