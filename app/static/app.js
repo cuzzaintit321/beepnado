@@ -114,14 +114,21 @@ function statusSettings(){
  $('work-content').innerHTML=`<div class="work-columns"><div class="panel"><h3>Make your monitoring public</h3><p class="billing-note">Create a read-only status page displaying monitor names, observed states, and recent incident dates. Anyone with the link can view the information.</p><form class="work-form" id="status-form"><label>Page title<input name="title" minlength="3" maxlength="70" required placeholder="Acme Service Status" value="${esc(sp?.title??'')}"></label><label>Public URL slug<input name="slug" minlength="3" maxlength="40" required pattern="[a-z0-9]+(-[a-z0-9]+)*" placeholder="acme-status" value="${esc(sp?.slug??'')}"></label><button class="btn btn-accent" type="submit">${sp?'Update':'Create'} status page ↗</button></form></div><div class="panel"><h3>Current public link</h3>${sp?`<div class="status-link"><span>${esc(url)}</span><a href="${esc('/s/'+sp.slug)}" target="_blank" rel="noopener" class="work-btn alt">Open ↗</a></div>`:empty('No status page yet','Create a page to share your current monitor health.')}${sp?`<h3>Embeddable status badge</h3><img alt="Current BeepNado status" src="/badge/${esc(sp.slug)}.svg" width="178" height="24"><label class="work-form">Copy HTML embed<textarea readonly rows="3">${esc('<a href="'+location.origin+'/s/'+sp.slug+'"><img src="'+location.origin+'/badge/'+sp.slug+'.svg" alt="Service status"></a>')}</textarea></label>`:''}<p class="work-form-hint">Public pages expose the monitors linked to your account. Avoid private customer names in public monitor labels.</p></div></div>`;
  $('status-form').addEventListener('submit',async e=>{e.preventDefault();const fd=new FormData(e.currentTarget);try{await api('/api/status-page',{method:'POST',body:JSON.stringify({title:fd.get('title'),slug:fd.get('slug')})});dash=await api('/api/dashboard');toast('Public status page saved');renderView();}catch(err){toast(err.message)}});
 }
+let billingCycle=new URLSearchParams(location.search).get('cycle')==='year'?'year':'month';
 function billing(){
- const canManageBilling=Boolean(user.stripe_customer && launchCapabilities?.billing);
- const freeAction=user.plan==='free'
-   ? '<button class="btn btn-accent" type="button" data-view="monitors">Use Free plan ↗</button>'
-   : `<button class="btn btn-accent" type="button" data-bill-plan="free" ${canManageBilling?'':'disabled'}>${canManageBilling?'Manage downgrade ↗':'Downgrade unavailable'}</button>`;
- const list=[['free','Free','$0','2 monitors / 5-minute checks'],['pro','Pro','$12','20 monitors / 1-minute checks'],['team','Team','$39','100 monitors / 30-second checks']];
- $('work-content').innerHTML=`<div class="panel"><h3>Your account</h3><p><strong>${esc(user.email)}</strong> · ${pill('up')} <span class="small-muted">Current plan: ${esc(user.plan.toUpperCase())}</span></p><p class="billing-note">Your plan controls the number of monitors and primary check interval. Paid billing opens only if Stripe prices and webhooks are configured. Payment cannot be activated by a browser redirect alone.</p></div><div class="pricing-grid section-spaced">${list.map(([id,label,price,description])=>`<div class="price-card"><div class="plan-tag">${esc(label.toUpperCase())}</div><div class="price">${price}<span>/mo</span></div><p>${esc(description)}</p>${id==='free'?freeAction:`<button class="btn ${id===user.plan?'btn-outline-dark':'btn-accent'}" data-bill-plan="${id}" ${id===user.plan || !launchCapabilities?.billing?'disabled':''}>${id===user.plan?'Current plan':launchCapabilities?.billing?'Subscribe ↗':'Planned tier'}</button>`}</div>`).join('')}</div>${canManageBilling?'<div class="panel section-spaced"><button class="work-btn" id="billing-portal">Manage billing in Stripe ↗</button></div>':''}<p class="billing-note">Manage an existing paid subscription in Stripe Billing.</p>`;
+ const canManageBilling=Boolean(launchCapabilities?.billing_portal);
+ const list=launchCapabilities?.plans||[];
+ const options=launchCapabilities?.checkout_options||[];
+ const activeSubscription=Boolean(user.stripe_customer && !['canceled','incomplete_expired'].includes(user.subscription_status));
+ $('work-content').innerHTML=`<div class="panel"><h3>Your account</h3><p><strong>${esc(user.email)}</strong> · <span class="small-muted">Current plan: ${esc(user.plan.toUpperCase())}</span></p><p class="billing-note">Your plan controls monitor capacity and primary check targets. Existing subscriptions retain their Stripe prices. New checkout is available only for verified billing options.</p>${canManageBilling?'<button class="work-btn" id="billing-portal">Manage existing subscription ↗</button>':''}</div><div class="panel section-spaced"><h3>Billing cycle</h3><label><input type="radio" name="billing-cycle" value="month" ${billingCycle==='month'?'checked':''}> Monthly</label> <label><input type="radio" name="billing-cycle" value="year" ${billingCycle==='year'?'checked':''}> Annual — two months free</label></div><div class="pricing-grid section-spaced bn-four-plans">${list.map(p=>{
+ const current=p.id===user.plan, free=p.id==='free', enabled=options.includes(p.id+':'+billingCycle), managing=activeSubscription&&canManageBilling;
+ const interval=p.interval_seconds>=60?(p.interval_seconds/60)+'-minute':p.interval_seconds+'-second';
+ const action=current?'Current plan':free?(managing?'Manage downgrade ↗':'Free plan'):managing?'Manage subscription ↗':enabled?'Subscribe ↗':'Checkout unavailable';
+ const disabled=current||(!managing&&(free||!enabled));
+ return `<div class="price-card"><div class="plan-tag">${esc(p.id.toUpperCase())}</div><div class="price">$${billingCycle==='year'?p.annual:p.monthly}<span>/${billingCycle==='year'?'yr':'mo'}</span></div><p>${Number(p.monitors)} monitors / ${interval} primary check target</p><p>Incident Investigator · 30-day check history · Public status pages</p><button class="btn ${current?'btn-outline-dark':'btn-accent'}" data-bill-plan="${esc(p.id)}" ${disabled?'disabled':''}>${action}</button></div>`;
+ }).join('')}</div><p class="billing-note">Intervals are scheduling targets, not an SLA. SSL and domain expiry use longer schedules. Annual totals are charged yearly. Existing Stripe subscriptions retain their terms.</p>`;
  $('billing-portal')?.addEventListener('click',openBillingPortal);
+ $('work-content').querySelectorAll('[name="billing-cycle"]').forEach(r=>r.onchange=()=>{billingCycle=r.value;billing();});
 }
 async function openBillingPortal(){
  try{
@@ -130,14 +137,12 @@ async function openBillingPortal(){
  }catch(e){toast(e.message)}
 }
 async function openCheckout(plan){
- if(plan==='free'){
-   if(user.plan==='free')selectView('monitors');
-   else if(user.stripe_customer && launchCapabilities?.billing)await openBillingPortal();
-   else toast('The billing portal is unavailable for this account.');
-   return;
+ if(user.stripe_customer && launchCapabilities?.billing_portal && !['canceled','incomplete_expired'].includes(user.subscription_status)){
+   await openBillingPortal();return;
  }
- if(!launchCapabilities?.billing){toast('Paid plans are not yet available.');return}
- try{const d=await api('/api/billing/checkout',{method:'POST',body:JSON.stringify({plan})});location.href=d.url}catch(e){toast(e.message)}
+ if(plan==='free'){selectView('monitors');return;}
+ if(!launchCapabilities?.checkout_options?.includes(plan+':'+billingCycle)){toast('This checkout option is not yet available.');return;}
+ try{const d=await api('/api/billing/checkout',{method:'POST',body:JSON.stringify({plan,cycle:billingCycle})});location.href=d.url}catch(e){toast(e.message)}
 }
 async function renderPublicStatus(slug){
  try{
