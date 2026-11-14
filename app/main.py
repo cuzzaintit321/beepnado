@@ -28,7 +28,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import h11
-from fastapi import FastAPI, HTTPException, Request, Response, Depends
+from fastapi import FastAPI, HTTPException, Request, Response, Depends, Query
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import AwareDatetime, BaseModel, Field
 
@@ -37,7 +37,7 @@ from .network_checks import (
     public_hostname, resolve_public, result as network_result,
 )
 
-from . import integrations, infrastructure, advanced_checks, browser_checks, teams, branding
+from . import integrations, infrastructure, advanced_checks, browser_checks, teams, branding, management
 from .journeys import JourneyInput, JourneySettings, JourneyTrace, journey_origin, probe_journey
 
 ROOT = Path(__file__).resolve().parent
@@ -230,6 +230,7 @@ def init_db():
         browser_checks.init(c)
         teams.init(c)
         branding.init(c)
+        management.init(c)
         # Additive migration: preserve all pre-existing accounts and monitor history.
         columns={r['name'] for r in c.execute('PRAGMA table_info(users)')}
         if 'email_verified_at' not in columns:
@@ -1136,7 +1137,7 @@ def home():
 
 @app.get('/static/{filename}')
 def static(filename:str):
-    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js','outage-alarm.js','integrations.js','infrastructure.js','browser.js','teams.js','branding.js'):raise HTTPException(404)
+    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js','outage-alarm.js','integrations.js','infrastructure.js','browser.js','teams.js','branding.js','management.js'):raise HTTPException(404)
     return FileResponse(ROOT/'static'/filename)
 
 
@@ -1603,6 +1604,130 @@ def team_labels(mid:int,body:teams.LabelsInput,request:Request,actor=Depends(act
         owner=collaboration_scope(c,actor,request,('owner','admin'))
         teams.labels(c,owner,actor['id'],mid,body)
     return {'ok':True}
+
+
+def management_owner(c,actor,request):
+    user=teams.scope(c,actor,request.headers.get('x-workspace-id'))
+    if user['workspace_role']!='owner':
+        raise HTTPException(403,'Workspace owner required')
+    return user['id']
+
+
+@app.get('/api/management/keys')
+def management_list(request:Request,actor=Depends(require_actor)):
+    with db() as c:
+        return management.list_keys(c,management_owner(c,actor,request))
+
+
+@app.post('/api/management/keys',status_code=201)
+def management_create(body:management.KeyInput,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        return management.create(c,management_owner(c,actor,request),actor['id'],body)
+
+
+@app.delete('/api/management/keys/{kid}')
+def management_revoke(kid:int,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        management.revoke(c,management_owner(c,actor,request),actor['id'],kid)
+    return {'ok':True}
+
+
+def api_scope(scope):
+    def dependency(request:Request):
+        # Keys cannot be used as login sessions. Browser-origin API requests are disabled.
+        if request.headers.get('origin') or request.cookies.get(COOKIE):
+            raise HTTPException(403,'Use a server-side API client without session cookies')
+        with db() as c:
+            c.execute('BEGIN IMMEDIATE')
+            return management.authenticate(c,request.headers.get('authorization',''),scope)
+    return dependency
+
+
+def key_audit(user,action):
+    with db() as c:
+        teams.audit(c,user['id'],user['actor_id'],'API key '+str(user['key_id'])+': '+action)
+
+
+@app.get('/api/v1/monitors')
+def v1_monitors(after:int=Query(0,ge=0,le=9223372036854775807),limit:int=Query(50,ge=1,le=100),user=Depends(api_scope('monitors:read'))):
+    with db() as c:
+        return management.monitors(c,user['id'],after,limit)
+
+
+@app.get('/api/v1/monitors/{mid}')
+def v1_monitor(mid:int,user=Depends(api_scope('monitors:read'))):
+    with db() as c:
+        return management.one_monitor(c,user['id'],mid)
+
+
+@app.post('/api/v1/monitors',status_code=201)
+async def v1_create_monitor(body:MonitorInput,user=Depends(api_scope('monitors:write'))):
+    result=await add_monitor(body,user)
+    key_audit(user,'Created website monitor '+str(result['id']))
+    return result
+
+
+@app.post('/api/v1/network-monitors',status_code=201)
+async def v1_create_network(body:NetworkInput,user=Depends(api_scope('monitors:write'))):
+    result=await add_network_monitor(body,user)
+    key_audit(user,'Created network monitor '+str(result['id']))
+    return result
+
+
+@app.patch('/api/v1/monitors/{mid}/rules')
+async def v1_rules(mid:int,body:CheckRules,user=Depends(api_scope('monitors:write'))):
+    result=await update_monitor_rules(mid,body,user)
+    key_audit(user,'Updated monitor rules '+str(mid))
+    return result
+
+
+@app.delete('/api/v1/monitors/{mid}')
+def v1_delete_monitor(mid:int,user=Depends(api_scope('monitors:write'))):
+    result=delete_monitor(mid,user)
+    key_audit(user,'Deleted monitor '+str(mid))
+    return result
+
+
+@app.post('/api/v1/monitors/{mid}/check')
+async def v1_run_check(mid:int,user=Depends(api_scope('checks:run'))):
+    result=await manual_check(mid,user)
+    key_audit(user,'Ran monitor check '+str(mid))
+    # Do not expose internal evidence or response bodies.
+    return {'ok':True,'result':{k:v for k,v in result.get('result',{}).items() if k in ('state','http_code','response_ms','error','detail','inconclusive')}}
+
+
+@app.get('/api/v1/monitors/{mid}/checks')
+def v1_checks(mid:int,before:int=Query(9223372036854775807,ge=1,le=9223372036854775807),limit:int=Query(50,ge=1,le=100),user=Depends(api_scope('checks:read'))):
+    with db() as c:
+        return management.checks(c,user['id'],mid,before,limit)
+
+
+@app.get('/api/v1/incidents')
+def v1_incidents(before:int=Query(9223372036854775807,ge=1,le=9223372036854775807),limit:int=Query(50,ge=1,le=100),user=Depends(api_scope('incidents:read'))):
+    with db() as c:
+        return management.incidents(c,user['id'],before,limit)
+
+
+@app.post('/api/v1/incidents/{iid}/acknowledge')
+def v1_ack(iid:int,user=Depends(api_scope('incidents:write'))):
+    result=acknowledge_incident(iid,user)
+    key_audit(user,'Acknowledged incident '+str(iid))
+    return result
+
+
+@app.get('/api/v1/infrastructure')
+def v1_infrastructure(user=Depends(api_scope('infrastructure:read'))):
+    with db() as c:
+        return {'items':infrastructure.list_servers(c,user['id'])}
+
+
+@app.get('/api/v1/status-pages')
+def v1_status_pages(user=Depends(api_scope('status:read'))):
+    with db() as c:
+        return {'items':([dict(r,kind='primary',published=True) for r in c.execute('SELECT id,title,slug FROM status_pages WHERE user_id=?',(user['id'],))]
+             + [dict(r,kind='client',published=bool(r['published'])) for r in c.execute('SELECT id,title,slug,published FROM client_pages WHERE user_id=?',(user['id'],))])}
 
 
 class ChannelInput(BaseModel):
