@@ -984,7 +984,7 @@ def home():
 
 @app.get('/static/{filename}')
 def static(filename:str):
-    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js','outage-alarm.js'):raise HTTPException(404)
+    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js','outage-alarm.js','integrations.js'):raise HTTPException(404)
     return FileResponse(ROOT/'static'/filename)
 
 
@@ -1797,6 +1797,24 @@ def status_page(slug: str, response: Response):
         ''' + STATUS_MONITOR_SCOPE + ' ORDER BY i.id DESC LIMIT 5', scope)]
     return {'title':row['title'],'monitors':mons,'incidents':incidents,'observed_at':clock,
             'primary_connectivity_unverified': bool(egress_status and not egress_status[1])}
+
+
+@app.get('/badge/{slug}.svg')
+def public_badge(slug:str):
+    status = status_page(slug,Response())
+    states = [m['state'] for m in status['monitors']]
+    if 'down' in states:
+        label,color='Incident','#b91c1c'
+    elif status['primary_connectivity_unverified']:
+        label,color='Unverified','#855a00'
+    elif 'maintenance' in states:
+        label,color='Maintenance','#855a00'
+    elif states and all(state=='up' for state in states):
+        label,color='Operational','#087443'
+    else:
+        label,color='Pending','#596579'
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="178" height="24" role="img" aria-label="BeepNado: {label}"><rect width="178" height="24" rx="4" fill="{color}"/><path fill="#29313d" d="M4 0h79v24H4a4 4 0 0 1-4-4V4a4 4 0 0 1 4-4"/><g fill="#fff" font-family="Verdana,sans-serif" font-size="11" text-anchor="middle"><text x="42" y="16">BeepNado</text><text x="130" y="16">{label}</text></g></svg>'
+    return Response(svg,media_type='image/svg+xml',headers={'Cache-Control':'no-store'})
 
 
 @app.get('/s/{slug}')
