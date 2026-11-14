@@ -338,3 +338,10 @@ status.example.net {
 ```
 
 Do not proxy the private dashboard or arbitrary API paths on customer hosts. Keep Host unchanged, verify the application sees the expected trusted proxy peer, validate the Caddy config, and test HTTPS, host isolation, expired TXT and downgrade behavior before announcing availability. Caddy provisioning is manual; the application does not mutate proxy configuration or request certificates itself. Subscriber and domain features require end-to-end tests before production use.
+
+
+## Management API v1 (beta)
+
+Create a scoped key in the API keys workspace view as the workspace owner. The full secret is displayed once and only its SHA-256 hash is stored. Use Authorization: Bearer with a bn_live_ token over HTTPS, without browser cookies or Origin headers. Keys expire after the selected 7/30/90/365-day period and can be revoked. Existing session, agent and heartbeat credentials are not management keys. Per-workspace active key limits are 1/3/10/25 and fixed-minute request limits are 30/60/120/240 for Free/Pro/Team/Scale. Downgrades suspend excess keys by creation order. In-flight requests may finish after revocation.
+
+API reference: /api/v1/docs. Supports website and typed network monitor creation, listing, reading, rule changes, deletion, manual checks, check history, incidents and acknowledgement, infrastructure summaries and status-page metadata. Scopes are independently granted. PATCH rules changes only supplied fields. Creation is not idempotent; reconcile existing resources after uncertain results. No billing, credential rotation, team management, authenticated browser transactions, or public status customization is exposed through v1. Automation keys can access private monitoring information within their selected scopes; store them in a secret manager. Audit entries for existing mutation routes are best effort. Full endpoint-level security and load testing are required before commercial launch.
