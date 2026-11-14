@@ -4,6 +4,7 @@ import secrets
 import re
 import time
 import json
+import os
 from typing import Literal
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -25,6 +26,7 @@ class AnnouncementInput(BaseModel):
     title:str=Field(min_length=3,max_length=100,pattern=r'\S')
     body:str=Field(min_length=1,max_length=2000,pattern=r'\S')
     kind:Literal['incident','maintenance','update']='update'
+    notify_subscribers:bool=False
 
 class DomainInput(BaseModel):
     hostname:str=Field(min_length=4,max_length=253)
@@ -64,7 +66,14 @@ def init(c):
         day INTEGER NOT NULL, views INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(brand_id,day)
     );
     CREATE INDEX IF NOT EXISTS status_announcements_brand ON status_announcements(brand_id,id DESC);
+    CREATE TABLE IF NOT EXISTS status_mail_jobs(
+        id INTEGER PRIMARY KEY AUTOINCREMENT, announcement_id INTEGER NOT NULL REFERENCES status_announcements(id) ON DELETE CASCADE,
+        subscriber_id INTEGER NOT NULL REFERENCES status_subscribers(id) ON DELETE CASCADE,
+        UNIQUE(announcement_id,subscriber_id)
+    );
     """)
+    if "unsubscribe_token" not in {r[1] for r in c.execute("PRAGMA table_info(status_subscribers)")}:
+        c.execute("ALTER TABLE status_subscribers ADD COLUMN unsubscribe_token TEXT")
 
 def page(c,owner,kind,pid,create=False):
     table='status_pages' if kind=='primary' else 'client_pages'
@@ -136,7 +145,8 @@ def domain_target(c,hostname):
         JOIN users u ON u.id=COALESCE(p.user_id,q.user_id)
         WHERE d.hostname=? AND d.verified_at IS NOT NULL AND d.activated_at IS NOT NULL
           AND (p.id IS NOT NULL OR q.published=1)""",(hostname,)).fetchone()
-    if not row or row['verified_at']<int(time.time())-86400:return None
+    allowed={x.strip().lower() for x in os.getenv('STATUS_CUSTOM_HOSTS','').split(',') if x.strip()}
+    if hostname not in allowed or not row or row['verified_at']<int(time.time())-86400:return None
     earlier=c.execute("""SELECT COUNT(*) FROM status_domains d JOIN status_branding b ON b.id=d.brand_id
         LEFT JOIN status_pages p ON p.id=b.primary_id LEFT JOIN client_pages q ON q.id=b.client_id
         WHERE COALESCE(p.user_id,q.user_id)=? AND d.id<?""",(row['owner'],row['id'])).fetchone()[0]
@@ -164,8 +174,28 @@ def confirm(c,token):
     row=c.execute('SELECT * FROM status_subscribers WHERE token_hash=? AND expires_at>? AND confirmed_at IS NULL',(hashlib.sha256(token.encode()).hexdigest(),int(time.time()))).fetchone()
     if not row:raise HTTPException(400,'Confirmation expired or invalid')
     unsubscribe=secrets.token_urlsafe(32)
-    c.execute('UPDATE status_subscribers SET confirmed_at=?,unsubscribe_hash=? WHERE id=?',(int(time.time()),hashlib.sha256(unsubscribe.encode()).hexdigest(),row['id']))
+    c.execute('UPDATE status_subscribers SET confirmed_at=?,unsubscribe_hash=?,unsubscribe_token=? WHERE id=?',(int(time.time()),hashlib.sha256(unsubscribe.encode()).hexdigest(),unsubscribe,row['id']))
     return row['email'],unsubscribe
 
 def unsubscribe(c,token):
     c.execute('DELETE FROM status_subscribers WHERE unsubscribe_hash=?',(hashlib.sha256(token.encode()).hexdigest(),))
+
+
+def queue_announcement(c,brand_id,aid,plan):
+    c.execute("""INSERT OR IGNORE INTO status_mail_jobs(announcement_id,subscriber_id)
+        SELECT ?,id FROM status_subscribers WHERE brand_id=? AND confirmed_at IS NOT NULL
+        AND unsubscribe_token IS NOT NULL ORDER BY id LIMIT ?""",(aid,brand_id,SUB_LIMITS.get(plan,25)))
+
+
+def mail_batch(c,site_url):
+    rows=c.execute("""SELECT j.id,s.email,s.unsubscribe_token,a.title,a.body,COALESCE(p.slug,q.slug) slug,
+        COALESCE(p.title,q.title) page_title,COALESCE(p.user_id,q.user_id) owner
+        FROM status_mail_jobs j JOIN status_subscribers s ON s.id=j.subscriber_id
+        JOIN status_announcements a ON a.id=j.announcement_id AND a.brand_id=s.brand_id
+        JOIN status_branding b ON b.id=a.brand_id
+        LEFT JOIN status_pages p ON p.id=b.primary_id LEFT JOIN client_pages q ON q.id=b.client_id
+        WHERE s.confirmed_at IS NOT NULL AND (p.id IS NOT NULL OR q.published=1)
+        ORDER BY j.id LIMIT 8""").fetchall()
+    return [dict(r,subject='Status update: '+r['title'].replace('\r',' ').replace('\n',' '),
+                 message=r['page_title']+'\n\n'+r['body']+'\n\nStatus page: '+site_url+'/s/'+r['slug']+
+                 '\nUnsubscribe: '+site_url+'/#status-unsubscribe='+r['unsubscribe_token']) for r in rows]
