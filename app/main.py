@@ -1650,6 +1650,11 @@ def key_audit(user,action):
         teams.audit(c,user['id'],user['actor_id'],'API key '+str(user['key_id'])+': '+action)
 
 
+@app.get('/api/v1/docs')
+def v1_docs():
+    return FileResponse(ROOT/'static'/'api-reference.html')
+
+
 @app.get('/api/v1/monitors')
 def v1_monitors(after:int=Query(0,ge=0,le=9223372036854775807),limit:int=Query(50,ge=1,le=100),user=Depends(api_scope('monitors:read'))):
     with db() as c:
