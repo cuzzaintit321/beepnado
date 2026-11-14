@@ -36,6 +36,14 @@ A saved client page can generate a 7-day or 30-day report, even while it is a dr
 
 Email protection is saved in your account and defaults to armed, preserving existing outage/recovery email behavior. The workspace has one **Arm / Disarm** button. Disarming stops queuing new incident emails (messages already queued may still be delivered); monitoring and incident history continue. Browser closure, logout and application restarts do not change the saved preference. Browser sound controls have been removed. SMTP must be configured; the server operator can verify delivery with `docker compose exec web python -m app.mail_check`. A primary server that loses power or internet access cannot send email; use an independent off-site worker to cover this failure mode.
 
+## False-outage protection
+
+Before a failed website, API, journey, or network probe can count toward an outage, BeepNado checks public connectivity against two independent HTTPS reference hosts. A cached healthy result from before a failure cannot confirm the new failure. If both references are unreachable, the result is inconclusive; it cannot open or resolve an outage, and is excluded from check pass-rate calculations. Previously confirmed incidents remain open until a successful observation. Historical samples are preserved; older samples with recognizable connectivity-guard markers are classified as inconclusive by an additive migration.
+
+A monitoring interruption resets unconfirmed failure streaks. Missed heartbeats are not treated as outages during an observed connectivity loss. On startup or recovery, active non-down heartbeats receive a fresh interval plus grace period; a late heartbeat arriving on its own does not create a retroactive outage.
+
+These guards reduce false alerts caused by the primary monitoring connection. They do not prove that a site is unavailable from every network, and cannot reliably detect all partial ISP failures or isolated inbound routing failures. A separate off-site worker is still required for independent observations and alert delivery when the primary host is unreachable; worker observations currently remain separate from primary incidents.
+
 ## Public monitoring from a second network
 
 Deploy the worker on a separate network so it can check public DNS, TLS, and HTTP even if the main BeepNado server is offline. On that host, copy `.worker.env.example` to `.worker.env` with mode 600. Set `WORKER_WATCH_URLS` to the HTTPS URLs you operate, then start the worker:
