@@ -37,7 +37,7 @@ from .network_checks import (
     public_hostname, resolve_public, result as network_result,
 )
 
-from . import integrations, infrastructure
+from . import integrations, infrastructure, advanced_checks
 from .journeys import JourneyInput, JourneySettings, JourneyTrace, journey_origin, probe_journey
 
 ROOT = Path(__file__).resolve().parent
@@ -664,6 +664,10 @@ async def run_probe(target, kind='http', config=None, *, public_only=False, **ht
         return await probe_journey(target, config, probe, account_for_probe_network, public_only=public_only)
     if kind == 'api':
         return await probe(target, public_only=public_only, expected_status=config['status'], api_config=config)
+    if kind in advanced_checks.PROTOCOL_PORTS or kind in advanced_checks.DNS_KINDS:
+        if kind=='blacklist' and os.getenv('ENABLE_DNSBL','false').lower()!='true':
+            return network_result(error='DNSBL provider is not enabled',unknown=True)
+        return await advanced_checks.check(kind,target,config,public_json)
     route_tls = (lambda host, ip: ip) if public_only else probe_connection_target
     return await probe_network(kind, target, config, get_json=public_json, route_tls=route_tls)
 
@@ -821,7 +825,7 @@ async def check_monitor(monitor_id, *, manual=False):
             return None
         if manual:
             last_check = max(mon['last_checked'] or '', mon['maintenance_last_checked'] or '')
-            cooldown = 300 if mon['probe_kind'] == 'domain' else 15
+            cooldown = 300 if mon['probe_kind'] in EXPIRY_INTERVALS else 15
             if last_check and (datetime.now(timezone.utc)-datetime.fromisoformat(last_check)).total_seconds() < cooldown:
                 raise HTTPException(429, f'Wait {cooldown} seconds between manual checks')
         result = await run_probe(
@@ -1484,12 +1488,14 @@ def dashboard(user=Depends(require_user)):
                 SELECT recent.monitor_id,recent.region,MAX(recent.id) AS id,m.probe_kind
                 FROM monitors m JOIN checks recent ON recent.monitor_id=m.id
                 WHERE m.user_id=? AND recent.checked_at>=CASE m.probe_kind
-                    WHEN 'ssl' THEN ? WHEN 'domain' THEN ? ELSE ? END
+                    WHEN 'ssl' THEN ? WHEN 'domain' THEN ? WHEN 'blacklist' THEN ?
+                     WHEN 'email_health' THEN ? WHEN 'spf' THEN ? WHEN 'dkim' THEN ? WHEN 'dmarc' THEN ? WHEN 'dnssec' THEN ? ELSE ? END
                   AND recent.region NOT IN ('primary','maintenance','heartbeat')
                 GROUP BY recent.monitor_id,recent.region
             ) latest ON latest.id=ch.id
             ORDER BY ch.checked_at DESC, ch.region
-        ''', (user['id'], history_since['ssl'], history_since['domain'], hour_ago)):
+        ''', (user['id'], history_since['ssl'], history_since['domain'], history_since['blacklist'],
+               history_since['email_health'],history_since['spf'],history_since['dkim'],history_since['dmarc'],history_since['dnssec'],hour_ago)):
             observation = dict(row)
             kind = observation.pop('probe_kind')
             observation['timings'] = json.loads(observation['timings']) if observation['timings'] else None
@@ -1576,6 +1582,24 @@ async def network_target(input):
                         'match': bool(input.expected.strip())}
 
     target = public_hostname(input.target, dns_record=input.kind == 'dns')
+    if input.kind in advanced_checks.PROTOCOL_PORTS:
+        ports=advanced_checks.PROTOCOL_PORTS[input.kind]
+        port=input.port or ports[0]
+        if port not in ports:
+            raise ValueError('Use one of the supported protocol ports')
+        await resolve_public(target,port)
+        return target,{'port':port}
+    if input.kind in advanced_checks.DNS_KINDS:
+        if input.kind=='blacklist':
+            if os.getenv('ENABLE_DNSBL','false').lower()!='true':
+                raise ValueError('DNSBL checks require operator enablement and provider approval')
+            return target,{'list':input.blacklist_list}
+        selector=input.selector.strip().lower()
+        if input.kind=='dkim' and not selector:
+            raise ValueError('Enter a DKIM selector')
+        if selector and not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?',selector):
+            raise ValueError('Enter a single valid DKIM selector label')
+        return target,{'selector':selector}
     if input.kind == 'dns':
         expected = input.expected.strip()
         if expected:
