@@ -937,7 +937,7 @@ async def channel_delivery_scheduler():
         try:
             with db() as c:
                 c.execute('BEGIN IMMEDIATE')
-                integrations.enqueue_escalations(c,SITE_URL,now())
+                integrations.enqueue_escalations(c,SITE_URL,now(),ACTIVE_MONITORS)
             await integrations.drain(db,validate_url)
         except asyncio.CancelledError:
             raise
