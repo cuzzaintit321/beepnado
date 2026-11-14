@@ -39,6 +39,57 @@ class BeepNadoTests(unittest.TestCase):
     def tearDown(self):
         self.client.__exit__(None,None,None)
 
+    def test_network_interruption_does_not_create_outages_or_reduce_pass_rate(self):
+        uid = self.client.get('/api/me').json()['user']['id']
+        with main.db() as c:
+            mid = c.execute('INSERT INTO monitors(user_id,name,url,created_at,last_checked) VALUES(?,?,?,?,?)',
+                            (uid,'Network test','https://example.net',main.now(),main.now())).lastrowid
+        passed = dict(state='up',http_code=200,response_ms=90,cert_days=None,error=None)
+        failed = dict(state='down',http_code=503,response_ms=100,cert_days=None,error='HTTP 503')
+        main.record_check(mid,passed)
+        main.record_check(mid,failed)
+        with patch.object(main,'public_egress_available',new=AsyncMock(return_value=False)):
+            unknown = asyncio.run(main.account_for_probe_network(failed))
+        self.assertEqual(unknown['state'],'unknown')
+        main.record_check(mid,unknown)
+        main.record_check(mid,unknown)
+        dash=self.client.get('/api/dashboard').json()
+        self.assertEqual(dash['incidents'],[])
+        self.assertEqual(dash['notifications'],[])
+        self.assertEqual(dash['monitors'][0]['samples_30d'],2)
+        self.assertEqual(dash['monitors'][0]['success_rate_30d'],50.0)
+        with main.db() as c:
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM checks WHERE monitor_id=? AND inconclusive=1',(mid,)).fetchone()[0],2)
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM email_outbox WHERE recipient=?',(self.email,)).fetchone()[0],0)
+        main.record_check(mid,failed)
+        self.assertEqual(self.client.get('/api/dashboard').json()['incidents'],[])
+        main.record_check(mid,failed)
+        self.assertEqual(len(self.client.get('/api/dashboard').json()['incidents']),1)
+        main.record_check(mid,unknown)
+        self.assertIsNone(self.client.get('/api/dashboard').json()['incidents'][0]['resolved_at'])
+        main.record_check(mid,passed)
+        self.assertIsNotNone(self.client.get('/api/dashboard').json()['incidents'][0]['resolved_at'])
+
+    def test_heartbeat_outage_requires_fresh_deadline_after_network_recovery(self):
+        uid=self.client.get('/api/me').json()['user']['id']
+        created=self.client.post('/api/monitors/heartbeat',headers=self.headers,
+                                json={'name':'Scheduled job','interval_minutes':5,'grace_minutes':1})
+        self.assertEqual(created.status_code,201,created.text)
+        mid=created.json()['id']
+        with main.db() as c:
+            c.execute('UPDATE monitors SET heartbeat_due_at=0 WHERE id=?',(mid,))
+        main.expire_heartbeats(connectivity_ok=False)
+        self.assertEqual(self.client.get('/api/dashboard').json()['incidents'],[])
+        main.expire_heartbeats(connectivity_ok=True,reset_overdue=True)
+        with main.db() as c:
+            self.assertGreater(c.execute('SELECT heartbeat_due_at FROM monitors WHERE id=?',(mid,)).fetchone()[0],0)
+        main.expire_heartbeats(connectivity_ok=True)
+        self.assertEqual(self.client.get('/api/dashboard').json()['incidents'],[])
+        with main.db() as c:
+            c.execute('UPDATE monitors SET heartbeat_due_at=0 WHERE id=?',(mid,))
+        main.expire_heartbeats(connectivity_ok=True)
+        self.assertEqual(len(self.client.get('/api/dashboard').json()['incidents']),1)
+
     def test_persistent_email_alarm(self):
         settings = self.client.get('/api/alarm-settings')
         self.assertEqual(settings.status_code, 200)
