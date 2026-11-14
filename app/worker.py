@@ -161,11 +161,11 @@ async def sync_once(base, token, region, expiry_checks=None):
         if kind in EXPIRY_INTERVALS and time.monotonic() < expiry_checks.get(monitor_id, 0):
             return
         async with semaphore:
-            result = await run_probe(target['url'], kind, target.get('config', {}), public_only=True)
+            result = await run_probe(target['url'], kind, target.get('config', {}), public_only=True, **target.get('rules', {}))
             result = await account_for_probe_network(result)
             try:
                 await asyncio.to_thread(dashboard_request, base, token, '/internal/result',
-                                        {'monitor_id': monitor_id, 'region': region, **result})
+                                        {'monitor_id': monitor_id, 'region': region, 'revision': target.get('revision'), **result})
             except (OSError, ValueError) as exc:
                 print(f'Worker result could not sync: {type(exc).__name__}', flush=True)
             else:
