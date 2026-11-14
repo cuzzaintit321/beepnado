@@ -37,7 +37,7 @@ from .network_checks import (
     public_hostname, resolve_public, result as network_result,
 )
 
-from . import integrations
+from . import integrations, infrastructure
 from .journeys import JourneyInput, JourneySettings, JourneyTrace, journey_origin, probe_journey
 
 ROOT = Path(__file__).resolve().parent
@@ -208,6 +208,7 @@ def init_db():
         );
         ''')
         integrations.init(c)
+        infrastructure.init(c)
         # Additive migration: preserve all pre-existing accounts and monitor history.
         columns={r['name'] for r in c.execute('PRAGMA table_info(users)')}
         if 'email_verified_at' not in columns:
@@ -938,6 +939,7 @@ async def channel_delivery_scheduler():
             with db() as c:
                 c.execute('BEGIN IMMEDIATE')
                 integrations.enqueue_escalations(c,SITE_URL,now(),ACTIVE_MONITORS)
+                c.execute('DELETE FROM infrastructure_samples WHERE received_at<?',(int(time.time())-infrastructure.RETENTION,))
             await integrations.drain(db,validate_url)
         except asyncio.CancelledError:
             raise
@@ -1041,7 +1043,7 @@ def home():
 
 @app.get('/static/{filename}')
 def static(filename:str):
-    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js','outage-alarm.js','integrations.js'):raise HTTPException(404)
+    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js','outage-alarm.js','integrations.js','infrastructure.js'):raise HTTPException(404)
     return FileResponse(ROOT/'static'/filename)
 
 
@@ -1210,6 +1212,78 @@ def displayed_state(monitor, window, clock):
     if monitor['maintenance_last_checked'] and monitor['state'] != 'down':
         return 'pending'
     return monitor['state']
+
+
+@app.get('/api/infrastructure')
+def infrastructure_list(user=Depends(require_user)):
+    with db() as c:
+        return infrastructure.list_servers(c,user['id'])
+
+
+@app.post('/api/infrastructure',status_code=201)
+def infrastructure_register(body:infrastructure.ServerInput,user=Depends(require_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        return infrastructure.register(c,user['id'],body)
+
+
+@app.get('/api/infrastructure/{sid}/history')
+def infrastructure_history(sid:int,user=Depends(require_user)):
+    with db() as c:
+        return infrastructure.history(c,user['id'],sid)
+
+
+@app.put('/api/infrastructure/{sid}')
+def infrastructure_update(sid:int,body:infrastructure.ServerInput,user=Depends(require_csrf)):
+    with db() as c:
+        if not c.execute("""UPDATE infrastructure_servers SET name=?,cpu_threshold=?,memory_threshold=?,disk_threshold=?,
+            bad_streak=0,good_streak=0 WHERE id=? AND user_id=?""",
+            (body.name.strip(),body.cpu_threshold,body.memory_threshold,body.disk_threshold,sid,user['id'])).rowcount:
+            raise HTTPException(404,'Server not found')
+    return {'ok':True}
+
+
+@app.post('/api/infrastructure/{sid}/rotate')
+def infrastructure_rotate(sid:int,user=Depends(require_csrf)):
+    token=secrets.token_urlsafe(32)
+    with db() as c:
+        if not c.execute('UPDATE infrastructure_servers SET token_hash=?,bad_streak=0,good_streak=0 WHERE id=? AND user_id=?',
+            (hashlib.sha256(token.encode()).hexdigest(),sid,user['id'])).rowcount:
+            raise HTTPException(404,'Server not found')
+    return {'token':token}
+
+
+@app.delete('/api/infrastructure/{sid}')
+def infrastructure_delete(sid:int,user=Depends(require_csrf)):
+    with db() as c:
+        if not c.execute('DELETE FROM infrastructure_servers WHERE id=? AND user_id=?',(sid,user['id'])).rowcount:
+            raise HTTPException(404,'Server not found')
+    return {'ok':True}
+
+
+@app.post('/api/agent/metrics')
+async def agent_metrics(request:Request):
+    match=re.fullmatch(r'Bearer ([A-Za-z0-9_-]{43})',request.headers.get('authorization',''),flags=re.IGNORECASE|re.ASCII)
+    if not match:
+        raise HTTPException(401,'Agent token required')
+    # Cap streamed bodies too; never expose validation input or credentials.
+    data=bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data)>65536:
+            raise HTTPException(413,'Metrics too large')
+    try:
+        metrics=infrastructure.Metrics.model_validate_json(data)
+    except ValueError:
+        raise HTTPException(422,'Invalid metrics payload')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        return infrastructure.ingest(c,match[1],metrics,enqueue_alert)
+
+
+@app.get('/agent/linux.py')
+def download_linux_agent():
+    return FileResponse(ROOT/'linux_agent.py',media_type='text/plain',filename='beepnado-agent.py')
 
 
 class ChannelInput(BaseModel):
