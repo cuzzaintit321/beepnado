@@ -232,7 +232,7 @@ def init_db():
             if name not in monitor_columns:
                 c.execute(f'ALTER TABLE monitors ADD COLUMN {name} {column_type}')
         check_columns = {r['name'] for r in c.execute('PRAGMA table_info(checks)')}
-        for column in ('detail', 'journey_trace'):
+        for column in ('detail', 'journey_trace', 'timings'):
             if column not in check_columns:
                 c.execute(f'ALTER TABLE checks ADD COLUMN {column} TEXT')
         if 'inconclusive' not in check_columns:
@@ -456,26 +456,51 @@ async def check_required_phrase(reader, connection, response, phrase):
 
 
 @asynccontextmanager
-async def http_response(url, public_only):
+async def http_response(url, public_only, timings=None):
+    clock = time.monotonic
+    started = clock()
     host, ip, port, path, scheme = await validate_url(url)
     target = ip if public_only else probe_connection_target(host, ip)
     context = ssl.create_default_context() if scheme == 'https' else None
-    reader, writer = await asyncio.wait_for(asyncio.open_connection(
-        target, port, ssl=context, server_hostname=host if context else None), timeout=8)
+    if timings is not None:
+        timings['dns_ms'] = round((clock()-started)*1000)
+        timings['route'] = 'local' if target != ip else 'public'
+    connected = clock()
+    reader, writer = await asyncio.wait_for(asyncio.open_connection(target, port), timeout=8)
     try:
+        if timings is not None:
+            timings['tcp_ms'] = round((clock()-connected)*1000)
+        if context:
+            tls_started = clock()
+            await writer.start_tls(context, server_hostname=host, ssl_handshake_timeout=8)
+            if timings is not None:
+                timings['tls_ms'] = round((clock()-tls_started)*1000)
         connection = h11.Connection(h11.CLIENT, max_incomplete_event_size=32 * 1024)
         request = h11.Request(method='GET', target=path, headers=[
             ('Host', host), ('User-Agent', 'BeepNado/0.1'),
             ('Accept-Encoding', 'identity'), ('Connection', 'close'),
         ])
+        request_started = clock()
         writer.write(connection.send(request) + connection.send(h11.EndOfMessage()))
         await asyncio.wait_for(writer.drain(), 5)
+        if timings is not None:
+            class MeasuredReader:
+                async def read(self, size):
+                    data = await reader.read(size)
+                    if data and 'ttfb_ms' not in timings:
+                        timings['ttfb_ms'] = round((clock()-request_started)*1000)
+                    return data
+            response_reader = MeasuredReader()
+        else:
+            response_reader = reader
         async with asyncio.timeout(8):
-            response = await response_event(reader, connection)
+            response = await response_event(response_reader, connection)
             while isinstance(response, h11.InformationalResponse) and response.status_code != 101:
-                response = await response_event(reader, connection)
+                response = await response_event(response_reader, connection)
         if not isinstance(response, h11.Response):
             raise ValueError('Invalid or unsupported HTTP response')
+        if timings is not None:
+            timings['headers_ms'] = round((clock()-started)*1000)
         yield reader, connection, response, writer
     finally:
         writer.close()
@@ -550,11 +575,34 @@ async def check_api_json(reader, connection, response, config):
     return None, f'JSON pointer {path} passed' if path else 'Valid JSON response'
 
 
+async def measure_body(reader, connection, timings):
+    # Bounded optional measurement; never change availability because a large body
+    # or slow download exceeds this diagnostic budget.
+    started = time.monotonic()
+    size = 0
+    try:
+        async with asyncio.timeout(3):
+            while True:
+                event = await response_event(reader, connection)
+                if isinstance(event, h11.EndOfMessage):
+                    timings['body_ms'] = round((time.monotonic()-started)*1000)
+                    timings['body_bytes'] = size
+                    return
+                if not isinstance(event, h11.Data):
+                    return
+                size += len(event.data)
+                if size > CONTENT_LIMIT:
+                    return
+    except (TimeoutError, OSError, h11.RemoteProtocolError):
+        return
+
+
 async def probe(url, *, required_phrase='', expected_status=None, max_response_ms=None, public_only=False,
                 api_config=None):
     started = time.monotonic()
+    timings = {}
     try:
-        async with http_response(url, public_only) as (reader, connection, response, writer):
+        async with http_response(url, public_only, timings) as (reader, connection, response, writer):
             code = response.status_code
             response_ms = int((time.monotonic() - started) * 1000)
             cert_days = None
@@ -579,11 +627,15 @@ async def probe(url, *, required_phrase='', expected_status=None, max_response_m
                           response_ms=response_ms, cert_days=cert_days, error=error)
             if detail:
                 result['detail'] = detail
+            if not required_phrase and api_config is None and not error:
+                await measure_body(reader, connection, timings)
+            timings['total_ms'] = round((time.monotonic()-started)*1000)
+            result['timings'] = timings
             return result
     except (h11.RemoteProtocolError, h11.LocalProtocolError):
-        return network_result(error='Invalid HTTP request or response')
+        return dict(network_result(error='Invalid HTTP request or response'), timings=timings)
     except (ValueError, OSError, TypeError, TimeoutError) as exc:
-        return network_result(error=f'{type(exc).__name__}: {str(exc)[:90]}')
+        return dict(network_result(error=f'{type(exc).__name__}: {str(exc)[:90]}'), timings=timings)
 
 
 async def run_probe(target, kind='http', config=None, *, public_only=False, **http_rules):
@@ -679,11 +731,11 @@ def record_check(monitor_id, result):
 
 def store_check(c, monitor_id, region, timestamp, state, result):
     trace = result.get('journey_trace')
-    c.execute('''INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error,detail,journey_trace,inconclusive)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
+    c.execute('''INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error,detail,journey_trace,inconclusive,timings)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''',
               (monitor_id, region, timestamp, state, result['http_code'], result['response_ms'],
                result['cert_days'], result['error'], result.get('detail'), json.dumps(trace) if trace else None,
-                int(result['state'] == 'unknown')))
+                int(result['state'] == 'unknown'), json.dumps(result['timings']) if result.get('timings') else None))
 
 
 def incident_evidence(observation, timestamp, state, region):
@@ -691,6 +743,8 @@ def incident_evidence(observation, timestamp, state, region):
         'checked_at': timestamp, 'state': state, 'region': region,
         **{key: observation.get(key) for key in ('http_code', 'response_ms', 'cert_days', 'error', 'detail')},
     }
+    if observation.get('timings'):
+        evidence['timings'] = observation['timings']
     if observation.get('journey_trace'):
         evidence['journey_trace'] = observation['journey_trace']
     return json.dumps(evidence)
@@ -1266,6 +1320,7 @@ def dashboard(user=Depends(require_user)):
         monitors=[dict(r) for r in c.execute('SELECT * FROM monitors WHERE user_id=? ORDER BY id DESC',(user['id'],))]
         checks=[dict(r) for r in c.execute('''SELECT ch.*,m.name monitor_name FROM checks ch JOIN monitors m ON m.id=ch.monitor_id WHERE m.user_id=? ORDER BY ch.id DESC LIMIT 150''',(user['id'],))]
         for check in checks:
+            check['timings'] = json.loads(check['timings']) if check['timings'] else None
             if check['journey_trace']:
                 check['journey_trace'] = json.loads(check['journey_trace'])
         incidents=[dict(r) for r in c.execute('''SELECT i.*,m.name monitor_name FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE m.user_id=? ORDER BY i.id DESC LIMIT 30''',(user['id'],))]
@@ -1296,7 +1351,7 @@ def dashboard(user=Depends(require_user)):
         hour_ago = (timestamp - timedelta(hours=1)).isoformat(timespec='seconds')
         for row in c.execute('''
             SELECT ch.monitor_id,ch.region,ch.checked_at,ch.state,ch.http_code,ch.response_ms,ch.error,ch.detail,
-                   ch.journey_trace,latest.probe_kind
+                   ch.journey_trace,ch.timings,latest.probe_kind
             FROM checks ch JOIN (
                 SELECT recent.monitor_id,recent.region,MAX(recent.id) AS id,m.probe_kind
                 FROM monitors m JOIN checks recent ON recent.monitor_id=m.id
@@ -1309,6 +1364,7 @@ def dashboard(user=Depends(require_user)):
         ''', (user['id'], history_since['ssl'], history_since['domain'], hour_ago)):
             observation = dict(row)
             kind = observation.pop('probe_kind')
+            observation['timings'] = json.loads(observation['timings']) if observation['timings'] else None
             if observation['journey_trace']:
                 observation['journey_trace'] = json.loads(observation['journey_trace'])
             freshness = max(900, 2 * EXPIRY_INTERVALS.get(kind, 0))
@@ -2037,6 +2093,18 @@ def remote_targets(request:Request, typed: bool = False, journeys: bool = False)
     return {'targets': targets}
 
 
+class ProbeTimings(BaseModel):
+    dns_ms:int|None=Field(default=None,ge=0,le=120000)
+    tcp_ms:int|None=Field(default=None,ge=0,le=120000)
+    tls_ms:int|None=Field(default=None,ge=0,le=120000)
+    ttfb_ms:int|None=Field(default=None,ge=0,le=120000)
+    headers_ms:int|None=Field(default=None,ge=0,le=120000)
+    body_ms:int|None=Field(default=None,ge=0,le=120000)
+    body_bytes:int|None=Field(default=None,ge=0,le=CONTENT_LIMIT)
+    total_ms:int|None=Field(default=None,ge=0,le=120000)
+    route:Literal['local','public']|None=None
+
+
 class WorkerResult(BaseModel):
     monitor_id:int=Field(gt=0)
     region:str=Field(min_length=2,max_length=32,pattern=r'^[a-z0-9_-]+$')
@@ -2048,6 +2116,7 @@ class WorkerResult(BaseModel):
     detail:str|None=Field(default=None,max_length=250)
     journey_trace:JourneyTrace|None=None
     revision:str|None=Field(default=None,pattern=r'^[0-9a-f]{64}$')
+    timings:ProbeTimings|None=None
 
 
 @app.post('/internal/result')
