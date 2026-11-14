@@ -44,3 +44,19 @@ body{background:var(--paper)}
 .pricing-grid.bn-four-plans{grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr))}
 
 .bn-browser-shot{display:block;width:100%;max-width:960px;height:auto;border-radius:8px;margin:12px 0;border:1px solid #354354}
+
+/* Public status branding; named palettes keep the CSP strict. */
+#public-status.bn-status-light{background:#f4f7fb;color:#162236;min-height:100vh}
+#public-status.bn-status-light .panel{background:#fff;color:#162236;border-color:#d7e0ec}
+#public-status.bn-status-light .status-bar{background:#fff;color:#162236}
+#public-status.bn-status-dark{background:#101827;color:#e7edf6;min-height:100vh}
+#public-status.bn-status-dark .panel{background:#1b2738;color:#e7edf6;border-color:#33445c}
+#public-status.bn-status-dark .status-bar{background:#162133;color:#e7edf6}
+#public-status.bn-accent-orange{--bn-brand:#ea580c}
+#public-status.bn-accent-blue{--bn-brand:#2563eb}
+#public-status.bn-accent-green{--bn-brand:#07804b}
+#public-status.bn-accent-purple{--bn-brand:#9333ea}
+#public-status.bn-accent-slate{--bn-brand:#64748b}
+#public-status .bn-public-brand{font-weight:800;font-size:1.25rem;color:var(--bn-brand,#ea580c)}
+#public-status .bn-status-announcement{border-left:3px solid var(--bn-brand,#ea580c);padding:12px 16px;margin:12px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+#public-status .bn-status-footer{white-space:pre-wrap;overflow-wrap:anywhere;padding:16px 0}
