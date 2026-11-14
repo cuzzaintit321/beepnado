@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 RETENTION=7*86400
 INTERVAL=60
-LIMITS={'free':1,'pro':5,'team':25}
+LIMITS={'free':1,'pro':5,'team':25,'scale':50}
 
 
 class ServerInput(BaseModel):
