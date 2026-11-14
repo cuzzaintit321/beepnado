@@ -1216,7 +1216,7 @@ def logout(request:Request,response:Response,user=Depends(require_csrf)):
 def me(request:Request):
     user=session_user(request)
     return {'signed_in':bool(user and user.get('email_verified_at')),'user':user if user and user.get('email_verified_at') else None,
-            'plans':{'free':{'monitors':2,'interval':300},'pro':{'monitors':20,'interval':60},'team':{'monitors':100,'interval':60}}}
+            'plans':{p:{'monitors':PLAN_LIMITS[p],'interval':PLAN_INTERVALS[p]} for p in PLAN_LIMITS}}
 
 
 def scheduled_maintenance(c, user_id, clock):
