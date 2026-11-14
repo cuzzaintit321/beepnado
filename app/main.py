@@ -348,8 +348,16 @@ def create_session(c, user_id):
     return token
 
 
+def session_token(request: Request):
+    authorization = request.headers.get('authorization', '')
+    if authorization:
+        match = re.fullmatch(r'Bearer ([A-Za-z0-9_-]{54})', authorization, flags=re.ASCII | re.IGNORECASE)
+        return match[1] if match else ''
+    return request.cookies.get(COOKIE, '')
+
+
 def session_user(request: Request):
-    token = request.cookies.get(COOKIE, '')
+    token = session_token(request)
     if not token:
         return None
     token_hash = hashlib.sha256(token.encode()).hexdigest()
@@ -944,8 +952,7 @@ def register(input:Credentials,request:Request):
     return {'ok':True,'message':'Check your email to verify your account'}
 
 
-@app.post('/api/login')
-def login(input:Credentials,request:Request,response:Response):
+def authenticate_credentials(input: Credentials, request: Request):
     email=input.email.strip().lower()
     throttle(request,'login-global','*',100,600)
     throttle(request,'login-email',email,8,600)
@@ -956,6 +963,19 @@ def login(input:Credentials,request:Request,response:Response):
         if not row['email_verified_at']:
             raise HTTPException(403,'Verify your email before signing in. Check your inbox or resend verification.')
         token=create_session(c,row['id'])
+    return token
+
+
+@app.post('/api/mobile/login')
+def mobile_login(input: Credentials, request: Request):
+    if request.headers.get('origin'):
+        raise HTTPException(403, 'Use the website sign-in in a browser')
+    return {'token': authenticate_credentials(input, request)}
+
+
+@app.post('/api/login')
+def login(input:Credentials,request:Request,response:Response):
+    token=authenticate_credentials(input, request)
     response.set_cookie(COOKIE,token,httponly=True,secure=SESSION_SECURE,samesite='lax',max_age=604800,path='/')
     return {'ok':True}
 
@@ -1031,7 +1051,7 @@ def reset_password(input:ResetInput,request:Request):
 
 @app.post('/api/logout')
 def logout(request:Request,response:Response,user=Depends(require_csrf)):
-    token=request.cookies.get(COOKIE,'')
+    token=session_token(request)
     with db() as c:c.execute('DELETE FROM sessions WHERE token_hash=?',(hashlib.sha256(token.encode()).hexdigest(),))
     response.delete_cookie(COOKIE,path='/')
     return {'ok':True}
