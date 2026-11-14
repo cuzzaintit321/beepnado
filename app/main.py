@@ -986,6 +986,7 @@ async def status_branding_scheduler():
                 clock=int(time.time())
                 c.execute('DELETE FROM status_daily_views WHERE day<?',(clock//86400-30,))
                 c.execute('DELETE FROM status_subscribers WHERE confirmed_at IS NULL AND expires_at<?',(clock,))
+                c.execute('DELETE FROM status_domains WHERE verified_at IS NULL AND activated_at IS NULL AND created_at<?',(clock-604800,))
                 domains=[dict(r) for r in c.execute('SELECT id,hostname,token FROM status_domains WHERE activated_at IS NOT NULL AND verified_at<? ORDER BY verified_at LIMIT 5',(clock-21600,))]
                 if email_ready() and os.getenv('ENABLE_STATUS_SUBSCRIBER_MAIL','false').lower()=='true':
                     # Move only a small batch to the normal SMTP outbox each cycle.
@@ -2174,6 +2175,36 @@ def brand_save(kind:Literal['primary','client'],pid:int,body:branding.BrandInput
     return {'ok':True}
 
 
+@app.put('/api/branding/{kind}/{pid}/images/{image_kind}')
+def brand_image_save(kind:Literal['primary','client'],pid:int,image_kind:Literal['logo','favicon'],body:branding.ImageInput,request:Request,actor=Depends(actor_csrf)):
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        owner=brand_manager(c,actor,request)
+        plan=c.execute('SELECT plan FROM users WHERE id=?',(owner,)).fetchone()[0]
+        branding.save_image(c,owner,kind,pid,image_kind,body,plan)
+        teams.audit(c,owner,actor['id'],'Updated public status image')
+    return {'ok':True}
+
+
+def public_brand_image(slug,image_kind):
+    with db() as c:
+        row=public_status_page(c,slug)
+        config,_,b=branding.public(c,row['user_id'],row['page_id'])
+        column='logo_png' if image_kind=='logo' else 'favicon_png'
+        if not b or not config['has_'+image_kind]:raise HTTPException(404,'Image unavailable')
+        return Response(b[column],media_type='image/png',headers={'X-Content-Type-Options':'nosniff'})
+
+
+@app.get('/api/public-status/{slug}/images/{image_kind}')
+def public_image(slug:str,image_kind:Literal['logo','favicon']):
+    return public_brand_image(slug,image_kind)
+
+
+@app.get('/api/custom-status/images/{image_kind}')
+def custom_image(request:Request,image_kind:Literal['logo','favicon']):
+    return public_brand_image(custom_status_slug(request),image_kind)
+
+
 @app.post('/api/branding/{kind}/{pid}/announcements')
 def brand_announce(kind:Literal['primary','client'],pid:int,body:branding.AnnouncementInput,request:Request,actor=Depends(actor_csrf)):
     with db() as c:
@@ -2487,7 +2518,7 @@ def status_page(slug: str, response: Response):
             window = windows.get(monitor['id'])
             mons.append({
                 'name': monitor['name'],
-                'group': (c.execute('SELECT client_group FROM team_monitor_labels WHERE monitor_id=?',(monitor['id'],)).fetchone() or [''])[0],
+                'group': (c.execute('SELECT client_group FROM team_monitor_labels WHERE monitor_id=?',(monitor['id'],)).fetchone() or [''])[0] if brand['show_groups'] else '',
                 'state': displayed_state(monitor, window, clock),
                 'last_checked': monitor['maintenance_last_checked'] or monitor['last_checked'],
                 'maintenance': {'starts_at': window['starts_at'], 'ends_at': window['ends_at']} if window else None,
