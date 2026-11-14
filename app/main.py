@@ -595,11 +595,12 @@ async def run_probe(target, kind='http', config=None, *, public_only=False, **ht
 
 EGRESS_PROBES = ('https://www.google.com/generate_204', 'https://one.one.one.one/')
 egress_status = None
+egress_failure_generation = 0
 egress_lock = asyncio.Lock()
 
 
 async def public_egress_available(*, fresh_after=None):
-    global egress_status
+    global egress_status, egress_failure_generation
     async with egress_lock:
         if egress_status and time.monotonic() < egress_status[0] and (
                 fresh_after is None or egress_status[2] >= fresh_after):
@@ -614,6 +615,8 @@ async def public_egress_available(*, fresh_after=None):
 
         started = time.monotonic()
         healthy = any(await asyncio.gather(*(check(url) for url in EGRESS_PROBES)))
+        if not healthy:
+            egress_failure_generation += 1
         egress_status = (time.monotonic() + 20, healthy, started)
         return healthy
 
@@ -796,24 +799,37 @@ def expire_heartbeats(*, connectivity_ok=True, reset_overdue=False):
         overdue = c.execute('SELECT m.* ' + ACTIVE_MONITORS + '''
             AND m.heartbeat_interval_s IS NOT NULL AND m.state!='down' AND m.heartbeat_due_at<?
         ''', (int(time.time()),)).fetchall()
+        if connectivity_ok and reset_overdue:
+            # Extend all non-down deadlines, not only those that have already passed.
+            # A job may have attempted delivery just before connectivity recovered.
+            for monitor in c.execute('SELECT m.* ' + ACTIVE_MONITORS +
+                                     " AND m.heartbeat_interval_s IS NOT NULL AND m.state!='down'").fetchall():
+                deadline = int(time.time()) + monitor['heartbeat_interval_s'] + monitor['heartbeat_grace_s']
+                c.execute('UPDATE monitors SET heartbeat_due_at=MAX(heartbeat_due_at,?) WHERE id=?',
+                          (deadline, monitor['id']))
+            return
         for monitor in overdue:
             if not connectivity_ok:
                 if monitor['error'] != 'Monitoring connectivity unavailable; heartbeat status inconclusive':
                     heartbeat_observation(c, monitor, 'unknown', 'Monitoring connectivity unavailable; heartbeat status inconclusive')
-            elif reset_overdue:
-                c.execute('UPDATE monitors SET heartbeat_due_at=? WHERE id=?',
-                          (int(time.time()) + monitor['heartbeat_interval_s'] + monitor['heartbeat_grace_s'], monitor['id']))
             else:
                 heartbeat_observation(c, monitor, 'down', 'No heartbeat arrived before the deadline')
 
 
 async def heartbeat_scheduler():
     interrupted = True
+    previous_generation = egress_failure_generation
+    last_cycle = None
     while True:
         try:
-            healthy = await public_egress_available(fresh_after=time.monotonic())
+            started = time.monotonic()
+            healthy = await public_egress_available(fresh_after=started)
+            generation = egress_failure_generation
+            gap = last_cycle is not None and started - last_cycle > 30
             await asyncio.to_thread(expire_heartbeats, connectivity_ok=healthy,
-                                    reset_overdue=healthy and interrupted)
+                                    reset_overdue=healthy and (interrupted or gap or generation != previous_generation))
+            previous_generation = generation
+            last_cycle = started
             interrupted = not healthy
         except asyncio.CancelledError:
             raise
@@ -1095,6 +1111,8 @@ def scheduled_maintenance(c, user_id, clock):
 def displayed_state(monitor, window, clock):
     if window and window['starts_at'] <= clock:
         return 'maintenance'
+    if egress_status and not egress_status[1] and monitor['state'] != 'down':
+        return 'degraded'
     if monitor['maintenance_last_checked'] and monitor['state'] != 'down':
         return 'pending'
     return monitor['state']
@@ -1219,7 +1237,7 @@ def dashboard(user=Depends(require_user)):
             mon['samples_30d']=int(stat['total']) if stat else 0
             mon['success_rate_30d']=round(100*stat['passed']/stat['total'],2) if stat and stat['total'] else None
     return {'monitors':monitors,'checks':checks,'incidents':incidents,'notifications':notices,'status_page':dict(page) if page else None,'plan':user['plan'],'limit':PLAN_LIMITS[user['plan']],
-            'primary_connectivity_unverified': bool(egress_status and time.monotonic() < egress_status[0] and not egress_status[1])}
+            'primary_connectivity_unverified': bool(egress_status and not egress_status[1])}
 
 
 class CheckRules(BaseModel):
@@ -1684,7 +1702,8 @@ def status_page(slug: str, response: Response):
             SELECT m.name AS monitor,i.opened_at,i.resolved_at
             FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE 1=1
         ''' + STATUS_MONITOR_SCOPE + ' ORDER BY i.id DESC LIMIT 5', scope)]
-    return {'title':row['title'],'monitors':mons,'incidents':incidents,'observed_at':clock}
+    return {'title':row['title'],'monitors':mons,'incidents':incidents,'observed_at':clock,
+            'primary_connectivity_unverified': bool(egress_status and not egress_status[1])}
 
 
 @app.get('/s/{slug}')
