@@ -7,7 +7,7 @@ async function renderBrowser(){
  function evidence(j,s){
   if(!s)return '<p>Awaiting a browser worker observation.</p>';
   return '<p>Observed: '+esc(stamp(s.checked_at))+' · '+esc(s.state)+' · '+esc(s.note)+'</p><p>HTTP '+esc(s.status??'—')+' · Load '+ms(s.load_ms)+' · FCP '+ms(s.fcp_ms)+' · LCP '+ms(s.lcp_ms)+' · Layout shift sum '+esc(s.cls??'—')+'</p><p>JavaScript errors: '+Number(s.js_errors)+' · Failed/blocked resources: '+Number(s.failed_resources)+' · Required text: '+(s.text_found===null?'Not configured':s.text_found?'Found':'Missing')+' · Visual difference: '+(Number.isFinite(s.visual_difference_percent)?s.visual_difference_percent+'%':'—')+'</p>'+
-   (s.has_screenshot?'<img class="bn-browser-shot" loading="lazy" alt="Recorded website screenshot" src="/api/browser/'+Number(j.id)+'/image/'+Number(s.id)+'">':'<p>No screenshot captured.</p>');
+   (s.has_screenshot?'<img class="bn-browser-shot" loading="lazy" alt="Recorded website screenshot" src="/api/browser/'+Number(j.id)+'/image/'+Number(s.id)+(workspaceScope?'?workspace='+encodeURIComponent(workspaceScope):'')+'">':'<p>No screenshot captured.</p>');
  }
  try{
   const data=await api('/api/browser');
