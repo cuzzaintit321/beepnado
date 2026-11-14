@@ -1,0 +1,17 @@
+async function renderManagement(){
+ const root=$('work-content');root.innerHTML='<div class="panel">Loading API keys…</div>';
+ if(user.workspace_role!=='owner'){root.innerHTML='<div class="panel"><h3>Owner access required</h3><p>Only the workspace owner can administer automation keys.</p></div>';return;}
+ const scopes=['monitors:read','monitors:write','checks:read','checks:run','incidents:read','incidents:write','infrastructure:read','status:read'];
+ try{
+  const keys=await api('/api/management/keys');if(view!=='management')return;
+  const stamp=v=>v?esc(fmt(new Date(v*1000).toISOString())):'Never';
+  root.innerHTML='<div class="work-columns"><div class="panel"><h3>API keys</h3><p>Keys are tied to this workspace. Revoking a key blocks subsequent requests.</p>'+keys.map(k=>'<div class="panel section-spaced"><strong>'+esc(k.name)+'</strong><p><code>'+esc(k.prefix)+'…</code> · '+(k.revoked_at?'Revoked':k.expires_at*1000<Date.now()?'Expired':'Issued')+'</p><p>'+esc(k.scopes.join(', '))+'</p><p>Expires '+stamp(k.expires_at)+' · Last used '+stamp(k.last_used)+'</p>'+(!k.revoked_at?'<button class="work-btn" data-key-revoke="'+Number(k.id)+'">Revoke</button>':'')+'</div>').join('')+'</div><div class="panel"><h3>Create API key</h3><form class="work-form" id="key-form"><label>Key name<input name="name" required minlength="2" maxlength="80"></label><label>Expiration<select name="expires_days"><option value="7">7 days</option><option value="30">30 days</option><option value="90" selected>90 days</option><option value="365">365 days</option></select></label><p>Choose only the permissions the integration needs.</p>'+scopes.map(s=>'<label><input type="checkbox" name="scope" value="'+s+'"> '+s+'</label>').join('')+'<button class="btn btn-accent">Create key</button></form><p class="billing-note">The full key is displayed once. Store it in a secret manager, never in source code or browser JavaScript.</p><p><a href="/api/v1/docs" target="_blank" rel="noopener">API reference ↗</a></p><div id="key-result"></div></div></div>';
+  const f=root.querySelector('#key-form');f.onsubmit=async e=>{e.preventDefault();const fd=new FormData(f),button=f.querySelector('button');button.disabled=true;try{
+   const data=await api('/api/management/keys',{method:'POST',body:JSON.stringify({name:fd.get('name'),expires_days:Number(fd.get('expires_days')),scopes:fd.getAll('scope')})});
+   const result=root.querySelector('#key-result');result.innerHTML='<p>Copy this key now. It cannot be retrieved later.</p><textarea readonly rows="3" aria-label="New API key"></textarea><button class="work-btn" data-copy>Copy key</button> <button class="work-btn" data-done>Done</button>';
+   result.querySelector('textarea').value=data.token;result.querySelector('[data-copy]').onclick=async()=>{try{await navigator.clipboard.writeText(data.token);toast('Key copied');}catch(e){toast('Select and copy the key manually');}};
+   result.querySelector('[data-done]').onclick=()=>renderManagement();f.reset();
+  }catch(err){toast(err.message);button.disabled=false;}};
+  for(const b of root.querySelectorAll('[data-key-revoke]'))b.onclick=async()=>{if(!confirm('Revoke this API key? Integrations using it will stop working.'))return;try{await api('/api/management/keys/'+Number(b.dataset.keyRevoke),{method:'DELETE'});renderManagement();}catch(e){toast(e.message);}};
+ }catch(e){if(view==='management')root.textContent=e.message;}
+}
