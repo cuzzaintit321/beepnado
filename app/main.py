@@ -2047,7 +2047,7 @@ class WorkerResult(BaseModel):
     error:str|None=None
     detail:str|None=Field(default=None,max_length=250)
     journey_trace:JourneyTrace|None=None
-    revision:str|None=Field(default=None,pattern=r'^[0-9a-f]{64}
+    revision:str|None=Field(default=None,pattern=r'^[0-9a-f]{64}$')
 
 
 @app.post('/internal/result')
@@ -2073,32 +2073,6 @@ def remote_result(item:WorkerResult,request:Request):
         result = item.model_dump()
         if item.revision and item.state=='down':
             result['detail']='Confirmed revision '+item.revision
-        result['error'] = (item.error or '')[:100]
-        state = 'degraded' if item.state == 'unknown' else item.state
-        store_check(c, item.monitor_id, item.region, now(), state, result)
-    return {'ok':True}
-)
-
-
-@app.post('/internal/result')
-def remote_result(item:WorkerResult,request:Request):
-    if not WORKER_TOKEN or len(WORKER_TOKEN)<32 or not hmac.compare_digest(request.headers.get('x-worker-token',''),WORKER_TOKEN):
-        raise HTTPException(401,'Worker not authorized')
-    if item.state not in ('up','down','unknown') or item.region in ('primary', 'maintenance', 'heartbeat'):raise HTTPException(422,'Invalid result')
-    # Keep the external observation separate from primary incident state.
-    with db() as c:
-        c.execute('BEGIN IMMEDIATE')
-        monitor = c.execute('SELECT m.probe_kind,m.probe_config ' + ACTIVE_MONITORS +
-                            ' AND m.id=? AND m.heartbeat_interval_s IS NULL', (item.monitor_id,)).fetchone()
-        if not monitor:
-            raise HTTPException(404)
-        if monitor['probe_kind'] == 'journey':
-            revision = json.loads(monitor['probe_config'])['revision']
-            if not item.journey_trace or item.journey_trace.revision != revision:
-                raise HTTPException(409, 'Journey settings changed. Fetch the current targets.')
-        elif item.journey_trace:
-            raise HTTPException(422, 'Journey evidence requires a journey monitor')
-        result = item.model_dump()
         result['error'] = (item.error or '')[:100]
         state = 'degraded' if item.state == 'unknown' else item.state
         store_check(c, item.monitor_id, item.region, now(), state, result)
