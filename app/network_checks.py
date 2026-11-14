@@ -16,7 +16,7 @@ from urllib.parse import urlencode
 from pydantic import BaseModel, Field
 
 DNS_TYPES = {'A': 1, 'AAAA': 28, 'CNAME': 5, 'MX': 15, 'NS': 2, 'TXT': 16, 'CAA': 257}
-EXPIRY_INTERVALS = {'ssl': 3600, 'domain': 21600}
+EXPIRY_INTERVALS = {'ssl': 3600, 'domain': 21600, 'blacklist': 21600, 'email_health': 3600, 'spf': 3600, 'dkim': 3600, 'dmarc': 3600, 'dnssec': 3600}
 TRANSITION_NETWORKS = tuple(map(ipaddress.ip_network, ('64:ff9b::/96', '64:ff9b:1::/48', '2001::/32', '2002::/16')))
 rdap_bootstrap = None
 rdap_lock = asyncio.Lock()
@@ -24,7 +24,7 @@ rdap_lock = asyncio.Lock()
 
 class NetworkInput(BaseModel):
     name: str = Field(min_length=2, max_length=100, pattern=r'^[^\r\n]+$')
-    kind: Literal['api', 'dns', 'ssl', 'domain', 'ping', 'tcp', 'udp']
+    kind: Literal['api', 'dns', 'ssl', 'domain', 'ping', 'tcp', 'udp', 'smtp', 'imap', 'pop3', 'ftp', 'sftp', 'email_health', 'spf', 'dkim', 'dmarc', 'dnssec', 'blacklist']
     target: str = Field(min_length=3, max_length=1500)
     authorized: bool
     port: int | None = Field(default=None, ge=1, le=65535)
@@ -35,6 +35,8 @@ class NetworkInput(BaseModel):
     response_prefix: str = Field(default='', max_length=384)
     status: int = Field(default=200, ge=200, le=299)
     json_path: str = Field(default='', max_length=200)
+    selector: str = Field(default='', max_length=63)
+    blacklist_list: Literal['spamhaus_zen','spamhaus_dbl'] = 'spamhaus_zen'
 
 
 def public_hostname(raw, *, dns_record=False):
