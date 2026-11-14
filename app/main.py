@@ -322,10 +322,10 @@ def throttle(request: Request, action: str, subject: str, limit: int, seconds: i
             c.execute('INSERT INTO rate_limits(key,window_start,count) VALUES(?,?,1) ON CONFLICT(key) DO UPDATE SET window_start=excluded.window_start,count=1',(key,clock))
 
 
-def enqueue_alert(c, user_id: int, subject: str, text: str):
+def enqueue_alert(c, user_id: int, subject: str, text: str, monitor_id=None, incident_id=None, recovery=False):
     u=c.execute('SELECT email,email_verified_at,email_alerts_enabled FROM users WHERE id=?',(user_id,)).fetchone()
     if u and u['email_verified_at'] and u['email_alerts_enabled']:
-        integrations.enqueue(c,user_id,subject,text)
+        integrations.enqueue(c,user_id,subject,text,monitor_id,incident_id,recovery)
     if email_ready() and u and u['email_verified_at'] and u['email_alerts_enabled']:
         c.execute('INSERT INTO email_outbox(recipient,subject,body,created_at,next_attempt) VALUES(?,?,?,?,?)',
                   (u['email'],subject,text,now(),int(time.time())))
@@ -774,12 +774,12 @@ def record_observation(c, m, result, region, timestamp=None):
         reason = result['error'] or 'Check failed'
         summary = f'{m["name"]} missed a heartbeat' if heartbeat else f'{m["name"]} failed its monitoring checks'
         opening = f'{m["name"]} missed a heartbeat' if heartbeat else f'Two checks failed for {m["name"]}'
-        c.execute('INSERT INTO incidents(monitor_id,opened_at,summary,opening_evidence) VALUES(?,?,?,?)',
-                  (monitor_id, timestamp, summary, incident_evidence(result, timestamp, state, region)))
+        incident_id=c.execute('INSERT INTO incidents(monitor_id,opened_at,summary,opening_evidence) VALUES(?,?,?,?)',
+                  (monitor_id, timestamp, summary, incident_evidence(result, timestamp, state, region))).lastrowid
         c.execute('INSERT INTO notifications(user_id,monitor_id,kind,message,created_at) VALUES(?,?,?,?,?)',
                   (m['user_id'],monitor_id,'outage',f'{m["name"]}: {reason}',timestamp))
         enqueue_alert(c,m['user_id'],'BeepNado outage: '+m['name'],
-                      f'{opening} at {timestamp} UTC.\nLatest result: {reason}\nLog in to {SITE_URL} to investigate.')
+                      f'{opening} at {timestamp} UTC.\nLatest result: {reason}\nLog in to {SITE_URL} to investigate.',monitor_id,incident_id)
     elif state=='up' and incident:
         recovery = 'heartbeat received' if heartbeat else 'monitor check passed again'
         recovery_event = 'sent a heartbeat' if heartbeat else 'passed a check'
@@ -788,7 +788,7 @@ def record_observation(c, m, result, region, timestamp=None):
         c.execute('INSERT INTO notifications(user_id,monitor_id,kind,message,created_at) VALUES(?,?,?,?,?)',
                   (m['user_id'],monitor_id,'recovery',f'{m["name"]}: {recovery}',timestamp))
         enqueue_alert(c,m['user_id'],'BeepNado recovery: '+m['name'],
-                      f'{m["name"]} {recovery_event} at {timestamp} UTC.\nSee {SITE_URL} for observations.')
+                      f'{m["name"]} {recovery_event} at {timestamp} UTC.\nSee {SITE_URL} for observations.',monitor_id,incident['id'],True)
     return {'state':state,'checked_at':timestamp,'http_code':result['http_code'],'response_ms':result['response_ms']}
 
 
@@ -935,6 +935,9 @@ async def channel_delivery_scheduler():
     await asyncio.sleep(5)
     while True:
         try:
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                integrations.enqueue_escalations(c,SITE_URL,now())
             await integrations.drain(db,validate_url)
         except asyncio.CancelledError:
             raise
@@ -1210,16 +1213,18 @@ def displayed_state(monitor, window, clock):
 
 
 class ChannelInput(BaseModel):
-    kind: Literal['slack','discord']
+    kind: Literal['slack','discord','telegram','teams','webhook']
     label: str = Field(min_length=1,max_length=60)
-    endpoint: str = Field(min_length=10,max_length=500)
+    endpoint: str = Field(min_length=10,max_length=1500)
+    monitor_id:int|None=Field(default=None,gt=0)
+    delay_minutes:int=Field(default=0,ge=0,le=1440)
 
 
 @app.get('/api/integrations')
 def list_integrations(user=Depends(require_user)):
     with db() as c:
         return [dict(row) for row in c.execute("""
-            SELECT a.id,a.kind,a.label,a.created_at,
+            SELECT a.id,a.kind,a.label,a.created_at,a.monitor_id,a.delay_minutes,
                 (SELECT MAX(o.sent_at) FROM channel_outbox o WHERE o.channel_id=a.id) AS last_delivered,
                 (SELECT COUNT(*) FROM channel_outbox o WHERE o.channel_id=a.id AND o.sent_at IS NULL AND o.attempts<7) AS pending,
                 (SELECT COUNT(*) FROM channel_outbox o WHERE o.channel_id=a.id AND o.sent_at IS NULL AND o.attempts>=7) AS failed
@@ -1228,9 +1233,14 @@ def list_integrations(user=Depends(require_user)):
 
 
 @app.post('/api/integrations',status_code=201)
-def add_integration(body:ChannelInput, user=Depends(require_csrf)):
+async def add_integration(body:ChannelInput, request:Request, user=Depends(require_csrf)):
+    throttle(request,'integration-add',str(user['id']),10,600)
+    if body.kind=='webhook' and os.getenv('ENABLE_GENERIC_WEBHOOKS','false').lower()!='true':
+        raise HTTPException(403,'Generic webhooks are disabled by the operator')
     try:
         endpoint=integrations.endpoint(body.kind,body.endpoint)
+        if body.kind=='webhook':
+            await validate_url(endpoint)
     except ValueError as exc:
         raise HTTPException(422,str(exc)) from exc
     with db() as c:
@@ -1239,8 +1249,10 @@ def add_integration(body:ChannelInput, user=Depends(require_csrf)):
             raise HTTPException(403,'Maximum five notification channels per account')
         if not body.label.strip():
             raise HTTPException(422,'Enter a channel label')
-        channel_id=c.execute('INSERT INTO alert_channels(user_id,kind,label,endpoint,created_at) VALUES(?,?,?,?,?)',
-            (user['id'],body.kind,body.label.strip(),endpoint,now())).lastrowid
+        if body.monitor_id is not None and not c.execute('SELECT 1 FROM monitors WHERE id=? AND user_id=?',(body.monitor_id,user['id'])).fetchone():
+            raise HTTPException(404,'Monitor not found')
+        channel_id=c.execute('INSERT INTO alert_channels(user_id,kind,label,endpoint,created_at,monitor_id,delay_minutes) VALUES(?,?,?,?,?,?,?)',
+            (user['id'],body.kind,body.label.strip(),endpoint,now(),body.monitor_id,body.delay_minutes)).lastrowid
     return {'id':channel_id}
 
 
@@ -1263,6 +1275,25 @@ def test_integration(channel_id:int,request:Request,user=Depends(require_csrf)):
         c.execute('INSERT INTO channel_outbox(channel_id,subject,body,created_at,next_attempt) VALUES(?,?,?,?,?)',
                   (channel_id,'BeepNado integration test','Your notification channel is configured.',clock,clock))
     return {'queued':True}
+
+
+@app.get('/api/integrations/history')
+def integration_history(user=Depends(require_user)):
+    with db() as c:
+        return [dict(r) for r in c.execute("""SELECT o.id,a.label,a.kind,o.subject,o.created_at,o.sent_at,o.attempts,
+            CASE WHEN o.sent_at IS NOT NULL THEN 'delivered' WHEN o.attempts>=7 THEN 'failed' ELSE 'pending' END AS state
+            FROM channel_outbox o JOIN alert_channels a ON a.id=o.channel_id
+            WHERE a.user_id=? ORDER BY o.id DESC LIMIT 50""",(user['id'],))]
+
+
+@app.post('/api/incidents/{incident_id}/acknowledge')
+def acknowledge_incident(incident_id:int,user=Depends(require_csrf)):
+    with db() as c:
+        if not c.execute("""UPDATE incidents SET acknowledged_at=COALESCE(acknowledged_at,?)
+            WHERE id=? AND resolved_at IS NULL AND monitor_id IN (SELECT id FROM monitors WHERE user_id=?)""",
+            (now(),incident_id,user['id'])).rowcount:
+            raise HTTPException(404,'Open incident not found')
+    return {'ok':True}
 
 
 class AlarmPreference(BaseModel):
