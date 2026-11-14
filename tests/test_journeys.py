@@ -24,8 +24,9 @@ class JourneyProbeTests(unittest.IsolatedAsyncioTestCase):
         passed = dict(main.network_result(), http_code=200)
         failed = dict(main.network_result(error='Expected HTTP 200, received HTTP 503'), http_code=503)
         probe = AsyncMock(side_effect=[passed, failed])
-        observed = await probe_journey('https://example.net', config, probe, main.account_for_probe_network,
-                                       public_only=True)
+        with patch.object(main, 'public_egress_available', AsyncMock(return_value=True)):
+            observed = await probe_journey('https://example.net', config, probe, main.account_for_probe_network,
+                                           public_only=True)
         self.assertEqual(observed['state'], 'down')
         self.assertEqual(observed['detail'], 'Step 2/3 · Pricing · Failed')
         self.assertEqual([step['name'] for step in observed['journey_trace']['steps']], ['Home', 'Pricing'])
@@ -55,7 +56,8 @@ class JourneyProbeTests(unittest.IsolatedAsyncioTestCase):
             return 'example.net', '127.0.0.1', port, url.removeprefix('http://example.net'), 'http'
 
         async with server:
-            with patch.object(main, 'validate_url', test_target):
+            with patch.object(main, 'validate_url', test_target), \
+                 patch.object(main, 'public_egress_available', AsyncMock(return_value=True)):
                 result = await main.run_probe('http://example.net', 'journey', JourneySettings(steps=STEPS).new_config())
         self.assertEqual(paths, [(b'GET', b'/'), (b'GET', b'/pricing')])
         self.assertEqual(result['state'], 'down')
