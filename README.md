@@ -36,13 +36,19 @@ A saved client page can generate a 7-day or 30-day report, even while it is a dr
 
 Email protection is saved in your account and defaults to armed, preserving existing outage/recovery email behavior. The workspace has one **Arm / Disarm** button. Disarming stops queuing new incident emails (messages already queued may still be delivered); monitoring and incident history continue. Browser closure, logout and application restarts do not change the saved preference. Browser sound controls have been removed. SMTP must be configured; the server operator can verify delivery with `docker compose exec web python -m app.mail_check`. A primary server that loses power or internet access cannot send email; use an independent off-site worker to cover this failure mode.
 
+## Unified public pricing and billing
+
+Free: 50 monitors / 300-second primary target. Pro: 50 / 60 seconds, $9 monthly or $90 annually. Team: 150 / 30 seconds, $29 or $290. Scale: 300 / 15 seconds, $59 or $590. These are scheduler targets, not guarantees; capacity must be load-tested before commercial rollout. The workspace reads the catalog from the API. Server limits are 1/5/25/50 respectively.
+
+Existing STRIPE_PRICE_PRO and STRIPE_PRICE_TEAM IDs are recognized for legacy subscription reconciliation, not new checkout. Configure new recurring USD price IDs with STRIPE_PRICE_PRO_MONTH, STRIPE_PRICE_PRO_YEAR, STRIPE_PRICE_TEAM_MONTH, STRIPE_PRICE_TEAM_YEAR, STRIPE_PRICE_SCALE_MONTH and STRIPE_PRICE_SCALE_YEAR. Each is optional; new checkout is gated per selection and verifies currency, amount, interval, active flag and live/test mode against Stripe before opening Checkout. Existing subscriptions retain their original billing terms. Review the Stripe customer portal configuration so it does not offer unintended prices or products. No Stripe resources are created or modified by this deployment. Existing incomplete checkout reservations may require operator review before reuse.
+
 ## Linux infrastructure monitoring
 
 Open **Infrastructure** in the workspace, register a server, and copy the generated commands onto that Linux machine. The Python standard-library agent sends HTTPS metrics every minute using a unique bearer token; only its SHA-256 hash is stored on the server. No inbound agent ports or remote command execution are supported. The provided command runs in the foreground for initial testing. Keep the JSON configuration private and rotate tokens if exposed.
 
 The agent reads CPU, RAM, swap, uptime, load, aggregate network and physical disk counters, and configured filesystem capacity. Configure optional systemd unit names and Docker container names in the agent JSON. Docker inspection requires the existing local Docker permissions; do not grant Docker socket access to an otherwise unprivileged account just for monitoring. Docker access is effectively root-equivalent. No container logs or environment variables are transmitted.
 
-Three consecutive warning samples trigger account-wide immediate notification channels and configured email, subject to Arm/Disarm. Three samples with no reported violations clear the resource alarm. Missing reports are labeled stale/unverified rather than generating false server-down alerts. CPU/RAM/disk thresholds are editable. Seven days of metrics are retained, with the latest 120 samples charted. Separate beta server limits are 1 Free, 5 Pro and 25 Team. Windows agents, temperature sensors, process monitoring, bandwidth rates, server-specific notification routing and independent heartbeat outage confirmation are not implemented in this release.
+Three consecutive warning samples trigger account-wide immediate notification channels and configured email, subject to Arm/Disarm. Three samples with no reported violations clear the resource alarm. Missing reports are labeled stale/unverified rather than generating false server-down alerts. CPU/RAM/disk thresholds are editable. Seven days of metrics are retained, with the latest 120 samples charted. Separate beta server limits are 1 Free, 5 Pro, 25 Team and 50 Scale. Windows agents, temperature sensors, process monitoring, bandwidth rates, server-specific notification routing and independent heartbeat outage confirmation are not implemented in this release.
 
 ## HTTP performance intelligence
 
@@ -173,7 +179,7 @@ After the test email arrives and the full verification/password-recovery loop pa
 - Existing HTTP(S) monitoring, HTTPS certificate expiry visibility, incident and recovery records, in-app notifications and shareable status pages.
 - Independent user sessions with secure cookies, scrypt password hashing, token-based email verification, password reset with session invalidation, CSRF guard on authenticated writes, basic registration/login throttles and a configurable public beta account cap (default 50).
 - Queued SMTP outage/recovery email alerts with retries (only for verified accounts when SMTP is configured), separate from customer dashboard notifications.
-- Functional free plan (2 monitors, 5-minute checks), subject to verification email being configured and registration being enabled.
+- Functional free plan (50 monitors, 5-minute check target), subject to verification email being configured and registration being enabled.
 - Public website feature/price detail dialogs, realistic but **explicitly simulated** uptime/down/recovery demo, FAQ and responsive keyboard interactions.
 - Stripe hooks remain opt-in and unconfigured; a paid tier is **not** available until full test subscriptions, webhook security, subscription cancellation, receipts and live billing are validated.
 
