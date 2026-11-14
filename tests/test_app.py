@@ -1,6 +1,7 @@
 import asyncio
 import os
 import tempfile
+import time
 import re
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,9 @@ from app import main
 
 class BeepNadoTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(main,'egress_status',None))
+        self.enterContext(patch.object(main,'public_egress_available',AsyncMock(return_value=True)))
+        self.enterContext(patch.object(main,'heartbeat_scheduler',AsyncMock(return_value=None)))
         self.client=TestClient(main.app)
         self.client.__enter__()
         self.email=f'user-{os.urandom(6).hex()}@example.net'
@@ -353,6 +357,17 @@ class BeepNadoTests(unittest.TestCase):
 
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cached_healthy_connection_cannot_confirm_a_later_failure(self):
+        failure = dict(main.network_result(error='HTTP 503'), http_code=503)
+        with patch.object(main,'egress_status',(time.monotonic()+20,True,time.monotonic()-5)), \
+             patch.object(main,'egress_failure_generation',0), \
+             patch.object(main,'egress_lock',asyncio.Lock()), \
+             patch.object(main,'probe',AsyncMock(return_value=main.network_result(error='Network unreachable'))) as probe:
+            result = await main.account_for_probe_network(failure)
+            self.assertEqual(result['state'],'unknown')
+            self.assertEqual(probe.await_count,len(main.EGRESS_PROBES))
+            self.assertFalse(main.egress_status[1])
+
     async def test_plan_intervals_while_a_slow_probe_is_running(self):
         start = datetime(2026, 1, 1, tzinfo=timezone.utc)
         current = start - timedelta(seconds=1)
