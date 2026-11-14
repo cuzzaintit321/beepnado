@@ -71,7 +71,8 @@ INIT="""(() => {
 
 async def capture(job):
     out={'job_id':job['id'],'lease':job['lease'],'state':'unknown','note':'worker_error'}
-    if origin(job['url']) not in ALLOWED_ORIGINS:
+    job_origin=origin(job['url'])
+    if job_origin not in ALLOWED_ORIGINS:
         return out
     try:
         async with asyncio.timeout(75):
@@ -89,7 +90,7 @@ async def capture(job):
                         service_workers='block',ignore_https_errors=False)
                     async def guard(route):
                         req=route.request
-                        if req.method not in ('GET','HEAD') or origin(req.url) not in ALLOWED_ORIGINS:
+                        if req.method not in ('GET','HEAD') or origin(req.url)!=job_origin:
                             await route.abort()
                         else:
                             await route.continue_()
@@ -103,7 +104,7 @@ async def capture(job):
                     page.on('response',lambda r:failures.append(1) if r.status>=400 and len(failures)<10000 else None)
                     try:
                         response=await page.goto(job['url'],wait_until='load',timeout=25000)
-                        if origin(page.url) not in ALLOWED_ORIGINS:
+                        if origin(page.url)!=job_origin:
                             return out
                     except Exception:
                         out.update(note='navigation_error')
@@ -142,7 +143,7 @@ async def capture(job):
 
 
 async def main():
-    if os.geteuid()==0 or ACK!='yes' or origin(BASE)!=BASE or len(TOKEN)<32 or not PROXY or not ALLOWED_ORIGINS or any(origin(x)!=x for x in ALLOWED_ORIGINS):
+    if os.geteuid()==0 or ACK!='yes' or not BASE.startswith('https://') or origin(BASE)!=BASE or len(TOKEN)<32 or not PROXY or not ALLOWED_ORIGINS or any(origin(x)!=x for x in ALLOWED_ORIGINS):
         raise SystemExit('Non-root worker, HTTPS API, token, approved origins, egress proxy and verified isolation required')
     while True:
         try:
