@@ -76,7 +76,7 @@ function selectView(v){view=v;renderView();}
 function renderView(){
  if(!dash)return;
  document.querySelectorAll('.side-link').forEach(e=>e.classList.toggle('active',e.dataset.view===view));
- const names={overview:'Overview',monitors:'Website monitors',incidents:'Incident history',alerts:'Alert feed',integrations:'Integrations',infrastructure:'Infrastructure',status:'Public status page',clients:'Client pages',billing:'Plan & billing'};
+ const names={overview:'Overview',monitors:'Website monitors',incidents:'Incident history',alerts:'Alert feed',integrations:'Integrations',infrastructure:'Infrastructure',browser:'Browser monitoring',status:'Public status page',clients:'Client pages',billing:'Plan & billing'};
  $('view-heading').textContent=names[view]||'Overview';$('view-crumb').textContent=(names[view]||'Overview').toUpperCase();
  if(view==='overview')return overview();
  if(view==='monitors')return monitors();
@@ -84,6 +84,7 @@ function renderView(){
  if(view==='alerts')return alerts();
  if(view==='integrations')return renderIntegrations();
  if(view==='infrastructure')return renderInfrastructure();
+ if(view==='browser')return renderBrowser();
  if(view==='status')return statusSettings();
  if(view==='clients')return renderClientPages();
  if(view==='billing')return billing();
