@@ -603,7 +603,8 @@ async def public_egress_available(*, fresh_after=None):
     global egress_status, egress_failure_generation
     async with egress_lock:
         if egress_status and time.monotonic() < egress_status[0] and (
-                fresh_after is None or egress_status[2] >= fresh_after):
+                fresh_after is None or not egress_status[1] or
+                (len(egress_status) > 2 and egress_status[2] >= fresh_after)):
             return egress_status[1]
 
         async def check(url):
@@ -625,10 +626,17 @@ async def account_for_probe_network(observation):
     # Never trust a positive connectivity result from before a failed check.
     # Even an HTTP error may originate from a local proxy during a network outage.
     if observation['state'] == 'down' and not await public_egress_available(fresh_after=time.monotonic()):
-        return network_result(
+        uncertain = network_result(
             error='The monitoring network could not reach either public reference host',
             detail='Check inconclusive while public connectivity is unverified', unknown=True,
         )
+        if observation.get('journey_trace'):
+            trace = observation['journey_trace']
+            steps = [dict(step) for step in trace['steps']]
+            if steps and steps[-1]['state'] == 'down':
+                steps[-1].update(state='unknown', error=uncertain['error'], http_code=None)
+            uncertain['journey_trace'] = {**trace, 'steps': steps}
+        return uncertain
     return observation
 
 
@@ -799,6 +807,9 @@ def expire_heartbeats(*, connectivity_ok=True, reset_overdue=False):
         overdue = c.execute('SELECT m.* ' + ACTIVE_MONITORS + '''
             AND m.heartbeat_interval_s IS NOT NULL AND m.state!='down' AND m.heartbeat_due_at<?
         ''', (int(time.time()),)).fetchall()
+        if not connectivity_ok or reset_overdue:
+            # A monitoring interruption breaks the consecutive-failure sequence.
+            c.execute("UPDATE monitors SET consecutive_failures=0 WHERE state!='down' AND consecutive_failures>0")
         if connectivity_ok and reset_overdue:
             # Extend all non-down deadlines, not only those that have already passed.
             # A job may have attempted delivery just before connectivity recovered.
@@ -817,6 +828,7 @@ def expire_heartbeats(*, connectivity_ok=True, reset_overdue=False):
 
 
 async def heartbeat_scheduler():
+    await asyncio.sleep(3)
     interrupted = True
     previous_generation = egress_failure_generation
     last_cycle = None
