@@ -68,6 +68,29 @@ class BeepNadoTests(unittest.TestCase):
                          'password':'LongRandomPassword123!'},headers={'Origin':'http://testserver'}).status_code,200)
         self.assertTrue(self.client.get('/api/alarm-settings').json()['armed'])
 
+    def test_mobile_bearer_session(self):
+        with TestClient(main.app) as mobile:
+            credentials = {'email':self.email,'password':'LongRandomPassword123!'}
+            self.assertEqual(mobile.post('/api/mobile/login',json=credentials,
+                         headers={'Origin':'http://testserver'}).status_code,403)
+            login = mobile.post('/api/mobile/login',json=credentials)
+            self.assertEqual(login.status_code,200,login.text)
+            self.assertNotIn(main.COOKIE,mobile.cookies)
+            token=login.json()['token']
+            self.assertEqual(len(token),54)
+            auth={'Authorization':'Bearer '+token}
+            me=mobile.get('/api/me',headers=auth).json()
+            self.assertTrue(me['signed_in'])
+            self.assertEqual(me['user']['email'],self.email)
+            self.assertEqual(mobile.get('/api/dashboard',headers=auth).status_code,200)
+            self.assertEqual(mobile.put('/api/alarm-settings',headers=auth,json={'armed':False}).status_code,403)
+            auth['X-CSRF-Token']=me['user']['csrf']
+            self.assertFalse(mobile.put('/api/alarm-settings',headers=auth,json={'armed':False}).json()['armed'])
+            self.assertTrue(mobile.put('/api/alarm-settings',headers=auth,json={'armed':True}).json()['armed'])
+            self.assertEqual(mobile.post('/api/logout',headers=auth).status_code,200)
+            self.assertEqual(mobile.get('/api/dashboard',headers=auth).status_code,401)
+            self.assertEqual(self.client.get('/api/dashboard').status_code,200)
+
     def test_register_sessions_and_account_guard(self):
         self.assertEqual(self.client.get('/api/dashboard').status_code,200)
         self.assertEqual(self.client.post('/api/status-page',json={'title':'My Status','slug':'my-test-status'}).status_code,403)
