@@ -51,6 +51,14 @@ class Metrics(BaseModel):
     network_tx_bytes:int|None=Field(default=None,ge=0,le=10**20)
     disk_read_bytes:int|None=Field(default=None,ge=0,le=10**20)
     disk_write_bytes:int|None=Field(default=None,ge=0,le=10**20)
+    network_rx_bps:float|None=Field(default=None,ge=0,le=10**15)
+    network_tx_bps:float|None=Field(default=None,ge=0,le=10**15)
+    disk_read_bps:float|None=Field(default=None,ge=0,le=10**15)
+    disk_write_bps:float|None=Field(default=None,ge=0,le=10**15)
+    temperature_c:float|None=Field(default=None,ge=-100,le=250)
+    reboot_pending:bool|None=None
+    critical_events_5m:int|None=Field(default=None,ge=0,le=100)
+    processes:list[Service]=Field(default_factory=list,max_length=32)
     disks:list[Disk]=Field(default_factory=list,max_length=32)
     services:list[Service]=Field(default_factory=list,max_length=32)
     containers:list[Container]=Field(default_factory=list,max_length=64)
@@ -96,11 +104,11 @@ def violations(server,metrics):
     for disk in metrics.disks:
         if disk.used_percent>=server['disk_threshold']:
             issues.append(f'Disk {disk.mount} {disk.used_percent:.1f}%')
-    for service in metrics.services:
+    for service in metrics.services+metrics.processes:
         if service.state in ('failed','inactive','deactivating'):
             issues.append(f'Service {service.name}: {service.state}')
     for container in metrics.containers:
-        if container.state not in ('running',) or container.health=='unhealthy':
+        if container.state not in ('running','unknown') or container.health=='unhealthy':
             issues.append(f'Container {container.name}: {container.health or container.state}')
     return issues
 
@@ -116,11 +124,14 @@ def ingest(c,token,metrics,notify):
         raise HTTPException(429,'Send metrics no more than once per minute')
     # Reuse account-wide channels only; server agents are not website monitors.
     issues=violations(server,metrics)
+    # Missing measurements must not clear an existing alarm.
+    incomplete=(metrics.cpu_percent is None or any(s.state=='unknown' for s in metrics.services+metrics.processes)
+                or any(x.state=='unknown' for x in metrics.containers))
     bad=server['bad_streak']+1 if issues else 0
-    good=server['good_streak']+1 if not issues else 0
+    good=server['good_streak']+1 if not issues and not incomplete else 0
     if server['last_seen'] is None or clock-server['last_seen']>180:
         bad=int(bool(issues))
-        good=int(not issues)
+        good=int(not issues and not incomplete)
     alarm=server['alarm']
     if bad>=3 and not alarm:
         alarm=1
@@ -130,8 +141,14 @@ def ingest(c,token,metrics,notify):
         notify(c,server['user_id'],'BeepNado server recovery: '+server['name'],'Three consecutive samples without reported threshold violations.')
     c.execute('UPDATE infrastructure_servers SET last_seen=?,bad_streak=?,good_streak=?,alarm=? WHERE id=?',
               (clock,min(bad,3),min(good,3),alarm,server['id']))
+    previous=c.execute('SELECT metrics FROM infrastructure_samples WHERE server_id=? ORDER BY id DESC LIMIT 1',(server['id'],)).fetchone()
+    payload=metrics.model_dump()
+    payload['reboot_observed']=False
+    if previous:
+        old=json.loads(previous['metrics'])
+        payload['reboot_observed']=metrics.uptime_seconds+60<old.get('uptime_seconds',0)
     c.execute('INSERT INTO infrastructure_samples(server_id,received_at,metrics) VALUES(?,?,?)',
-              (server['id'],clock,metrics.model_dump_json()))
+              (server['id'],clock,json.dumps(payload)))
     return {'ok':True,'interval_seconds':INTERVAL}
 
 
