@@ -15,8 +15,10 @@ function toast(text){
  clearTimeout(message._t);
  message._t=setTimeout(()=>message.classList.remove('show'),4500);
 }
+const workspaceScope=new URLSearchParams(location.search).get('workspace');
 async function api(path, opts={}){
   let headers={'Accept':'application/json',...(opts.body?{'Content-Type':'application/json'}:{}),...(opts.headers||{})};
+  if(workspaceScope && path.startsWith('/api/'))headers['X-Workspace-Id']=workspaceScope;
   if(user?.csrf && opts.method && opts.method.toUpperCase()!=='GET')headers['X-CSRF-Token']=user.csrf;
   let response=await fetch(path,{credentials:'same-origin',...opts,headers});
   let data=await response.json().catch(()=>({}));
@@ -63,20 +65,23 @@ async function refreshUser(){
  return response;
 }
 async function loadDashboard(){
- await refreshUser();
+ try{await refreshUser();}catch(e){if(workspaceScope){location.replace('/#teams');return;}throw e;}
  if(!signedIn){openAuth('login');return}
+ if(await acceptWorkspaceInvitation())return;
  dash=await api('/api/dashboard');
  try{launchCapabilities=await api('/api/availability')}catch(e){launchCapabilities=null}
- if(location.hash==='#pricing' || new URLSearchParams(location.search).has('billing')) view='billing';
+ if(location.hash==='#teams'||location.hash.startsWith('#invite=')) view='teams';
+ else if(location.hash==='#pricing' || new URLSearchParams(location.search).has('billing')) view='billing';
  else if(!dash.monitors.length) view='monitors';
- $('user-chip').textContent=user.email+' · '+user.plan.toUpperCase();
+ $('user-chip').textContent=user.email+' · '+(user.workspace_name||'Personal workspace')+' · '+(user.workspace_role||'owner')+' · '+user.plan.toUpperCase();
+ document.querySelector('[data-view="billing"]').hidden=user.workspace_role!=='owner';
  show('workspace');renderView();
 }
 function selectView(v){view=v;renderView();}
 function renderView(){
  if(!dash)return;
  document.querySelectorAll('.side-link').forEach(e=>e.classList.toggle('active',e.dataset.view===view));
- const names={overview:'Overview',monitors:'Website monitors',incidents:'Incident history',alerts:'Alert feed',integrations:'Integrations',infrastructure:'Infrastructure',browser:'Browser monitoring',status:'Public status page',clients:'Client pages',billing:'Plan & billing'};
+ const names={overview:'Overview',monitors:'Website monitors',incidents:'Incident history',alerts:'Alert feed',integrations:'Integrations',infrastructure:'Infrastructure',browser:'Browser monitoring',teams:'Team workspace',status:'Public status page',clients:'Client pages',billing:'Plan & billing'};
  $('view-heading').textContent=names[view]||'Overview';$('view-crumb').textContent=(names[view]||'Overview').toUpperCase();
  if(view==='overview')return overview();
  if(view==='monitors')return monitors();
@@ -85,9 +90,10 @@ function renderView(){
  if(view==='integrations')return renderIntegrations();
  if(view==='infrastructure')return renderInfrastructure();
  if(view==='browser')return renderBrowser();
+ if(view==='teams')return renderTeams();
  if(view==='status')return statusSettings();
  if(view==='clients')return renderClientPages();
- if(view==='billing')return billing();
+ if(view==='billing')return user.workspace_role==='owner'?billing():renderTeams();
 }
 const empty = (title,text) => `<div class="empty-data"><strong>${title}</strong>${text}</div>`;
 function rowsMonitor(list){
@@ -213,6 +219,7 @@ async function init(){
  $('signout')?.addEventListener('click',async()=>{
    try {
      await api('/api/logout',{method:'POST'});
+     if(workspaceScope){location.replace('/');return;}
      user=null;
      signedIn=false;
      dash=null;
