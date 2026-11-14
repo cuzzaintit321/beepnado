@@ -32,3 +32,23 @@ async function acceptWorkspaceInvitation(){
  if(!confirm('Accept this BeepNado workspace invitation with your signed-in email address?'))return false;
  try{const r=await api('/api/team/accept',{method:'POST',body:JSON.stringify({token:match[1]})});location.replace('/?workspace='+Number(r.workspace_id)+'#teams');return true;}catch(e){toast(e.message);return false;}
 }
+
+async function showIncidentCollaboration(id){
+ const d=document.createElement('dialog');d.className='bn-investigator';document.body.append(d);d.addEventListener('close',()=>d.remove(),{once:true});d.showModal();
+ async function paint(){
+  try{
+   const data=await api('/api/team/incidents/'+id);
+   const edit=['owner','admin','operator'].includes(user.workspace_role);
+   d.innerHTML='<h2>Incident collaboration</h2><p>Assigned to: '+esc(data.assignee?.email||'Unassigned')+'</p>'+(edit?'<form class="work-form" data-assign><label>Assignee<select name="member"><option value="">Unassigned</option>'+data.choices.map(x=>'<option value="'+Number(x.id)+'" '+(x.id===data.assignee?.member_id?'selected':'')+'>'+esc(x.email)+'</option>').join('')+'</select></label><button class="work-btn">Assign</button></form><form class="work-form" data-note><label>Incident note<textarea name="body" maxlength="2000" required></textarea></label><button class="work-btn">Add note</button></form>':'')+'<h3>Notes</h3>'+(data.notes.map(n=>'<div class="panel section-spaced"><strong>'+esc(n.actor||'Former account')+'</strong><p>'+esc(fmt(new Date(n.created_at*1000).toISOString()))+'</p><p>'+esc(n.body)+'</p></div>').join('')||'<p>No notes yet.</p>')+'<button class="work-btn" data-close>Close</button>';
+   d.querySelector('[data-close]').onclick=()=>d.close();
+   const a=d.querySelector('[data-assign]');if(a)a.onsubmit=async e=>{e.preventDefault();try{await api('/api/team/incidents/'+id+'/assignment',{method:'PUT',body:JSON.stringify({member_id:a.elements.member.value?Number(a.elements.member.value):null})});paint();}catch(err){toast(err.message);}};
+   const n=d.querySelector('[data-note]');if(n)n.onsubmit=async e=>{e.preventDefault();try{await api('/api/team/incidents/'+id+'/notes',{method:'POST',body:JSON.stringify({body:n.elements.body.value})});paint();}catch(err){toast(err.message);}};
+  }catch(e){d.textContent=e.message;}
+ }
+ await paint();
+}
+async function editMonitorLabels(id){
+ const m=dash.monitors.find(x=>x.id===id);if(!m)return;
+ const d=document.createElement('dialog');d.className='bn-investigator';d.innerHTML='<h2>Monitor labels</h2><form class="work-form"><label>Client group<input name="group" maxlength="80"></label><label>Tags (comma separated, up to 10)<input name="tags" maxlength="410"></label><button class="work-btn">Save</button></form><button class="work-btn" data-close>Cancel</button>';
+ const f=d.querySelector('form');f.elements.group.value=m.client_group||'';f.elements.tags.value=m.tags||'';f.onsubmit=async e=>{e.preventDefault();try{await api('/api/team/monitors/'+id+'/labels',{method:'PUT',body:JSON.stringify({client_group:f.elements.group.value,tags:f.elements.tags.value.split(',').map(x=>x.trim()).filter(Boolean)})});dash=await api('/api/dashboard');d.close();renderView();}catch(err){toast(err.message);}};d.querySelector('[data-close]').onclick=()=>d.close();document.body.append(d);d.addEventListener('close',()=>d.remove(),{once:true});d.showModal();
+}
