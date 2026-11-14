@@ -20,6 +20,7 @@ async def protocol(kind,host,port):
     ip=await resolve_public(host,port)
     implicit=port in (465,993,995,990)
     ctx=ssl.create_default_context() if implicit else None
+    started=asyncio.get_running_loop().time()
     async with asyncio.timeout(8):
         reader,writer=await asyncio.open_connection(ip,port,ssl=ctx,server_hostname=host if implicit else None,limit=4096)
         try:
@@ -32,7 +33,7 @@ async def protocol(kind,host,port):
                       'pop3':rb'^\+OK\b','sftp':rb'^SSH-2\.0-'}[kind]
             if not re.match(expected,line,re.I):
                 return result(error='Unexpected '+kind.upper()+' greeting')
-            return result(detail=kind.upper()+' greeting accepted'+(' (verified TLS)' if implicit else ''))
+            return result(detail=kind.upper()+' greeting accepted'+(' (verified TLS)' if implicit else ''), response_ms=round((asyncio.get_running_loop().time()-started)*1000))
         finally:
             writer.close()
 
@@ -131,5 +132,5 @@ async def check(kind,host,config,get_json):
         name=host if kind=='spf' else '_dmarc.'+host if kind=='dmarc' else config['selector']+'._domainkey.'+host
         valid,detail=policy(kind,await dns_query(name,'TXT',get_json))
         return result(error=None if valid else detail,detail=detail)
-    except (OSError,ValueError,TimeoutError,KeyError,TypeError) as exc:
+    except (OSError,ValueError,TimeoutError,KeyError,TypeError,AttributeError) as exc:
         return result(error=kind.upper()+' check failed: '+type(exc).__name__,unknown=kind in DNS_KINDS)
