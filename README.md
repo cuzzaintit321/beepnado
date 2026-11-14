@@ -308,3 +308,33 @@ The development environment ran **18 backend tests** successfully; the interacti
 ## Shared team workspaces (beta)
 
 Each existing account owns one workspace and retains its resources and billing. The owner may rename it and invite verified accounts. Members may switch between their own workspace and workspaces they have joined; there is no separate multi-organization provisioning or client-only access in this release. Every request checks the selected workspace membership and current plan. Seats including the owner: Free 1, Pro 3, Team 15, Scale 50. Invitations expire after 72 hours, are email-bound and single-use. Pending invitations reserve capacity; older memberships retain access on downgrade. Invitees need an existing verified account or enabled registration. Owners manage billing, admin appointments, alarm settings and agent token rotation; admins manage monitors/integrations and operator/viewer memberships; operators run checks, acknowledge incidents, assign incidents and add notes; viewers read shared resources. Existing account-wide channels are shared, not individual recipient routing. Client group and tags are searchable metadata, not security boundaries. Never invite customers who must only see their own monitors to a shared workspace. Team audit records membership and collaboration changes and best-effort successful existing API mutations. Revocation affects subsequent requests; already-running requests may finish. Audit history is not tamper-proof. Test all role/API boundaries and invitation email delivery before production use.
+
+
+## Branded status pages and custom domains (beta)
+
+Use Status branding in the dashboard after creating a primary or client status page. Paid plans can select themes and named accent colors, upload PNG logos (up to 512×512) and favicons (up to 64×64), each at most 40 KB, and add plain-text footer content. Team/Scale can hide BeepNado branding. Client group labels are private unless explicitly published. Announcements are public plain text. Page-load analytics are approximate counts, not unique visitors.
+
+Subscriber email is opt-in and disabled by default. Set ENABLE_STATUS_SUBSCRIBER_MAIL=true only after SMTP testing and reviewing sender compliance, consent, abuse controls and delivery capacity. Subscribers confirm by email and can unsubscribe. Publication can optionally queue messages to confirmed subscribers; it does not automatically mail every monitor transition. The scheduler transfers small batches to the normal mail outbox; messages already queued may still arrive after unsubscribe. Subscriber address counts are per page. Never use this for marketing campaigns.
+
+Custom hostnames require an individual DNS TXT challenge under _beepnado.<hostname>. Pending unverified reservations expire after seven days. Add the exact approved hostname to STATUS_CUSTOM_HOSTS (comma-separated), configure the existing TRUSTED_PROXY_IP to the actual Caddy peer, recreate the web container, and click Verify DNS again. The service rechecks activated TXT records periodically and stops serving stale or revoked mappings. Point the hostname to the Caddy host using appropriate DNS A/AAAA or CNAME records. Operator must explicitly provision an isolated Caddy site block for each hostname, using automatic HTTPS for that named site only. No catch-all/on-demand TLS or arbitrary host routing.
+
+Example site block (replace status.example.net and upstream with the exact approved hostname and existing BeepNado web upstream on your Caddy network):
+
+```caddyfile
+status.example.net {
+    @root path /
+    handle @root {
+        rewrite * /custom-status-page
+        reverse_proxy beepnado-web:8000
+    }
+    @public path /api/custom-status /api/custom-status/subscribe /api/custom-status/images/logo /api/custom-status/images/favicon /static/site.css /static/experience.css /static/monitor-theme.css /static/app.js /static/branding.js
+    handle @public {
+        reverse_proxy beepnado-web:8000
+    }
+    handle {
+        respond 404
+    }
+}
+```
+
+Do not proxy the private dashboard or arbitrary API paths on customer hosts. Keep Host unchanged, verify the application sees the expected trusted proxy peer, validate the Caddy config, and test HTTPS, host isolation, expired TXT and downgrade behavior before announcing availability. Caddy provisioning is manual; the application does not mutate proxy configuration or request certificates itself. Subscriber and domain features require end-to-end tests before production use.
