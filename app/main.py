@@ -37,6 +37,7 @@ from .network_checks import (
     public_hostname, resolve_public, result as network_result,
 )
 
+from . import integrations
 from .journeys import JourneyInput, JourneySettings, JourneyTrace, journey_origin, probe_journey
 
 ROOT = Path(__file__).resolve().parent
@@ -205,6 +206,7 @@ def init_db():
           sent_at TEXT
         );
         ''')
+        integrations.init(c)
         # Additive migration: preserve all pre-existing accounts and monitor history.
         columns={r['name'] for r in c.execute('PRAGMA table_info(users)')}
         if 'email_verified_at' not in columns:
@@ -320,9 +322,10 @@ def throttle(request: Request, action: str, subject: str, limit: int, seconds: i
 
 
 def enqueue_alert(c, user_id: int, subject: str, text: str):
-    if not email_ready():return
     u=c.execute('SELECT email,email_verified_at,email_alerts_enabled FROM users WHERE id=?',(user_id,)).fetchone()
     if u and u['email_verified_at'] and u['email_alerts_enabled']:
+        integrations.enqueue(c,user_id,subject,text)
+    if email_ready() and u and u['email_verified_at'] and u['email_alerts_enabled']:
         c.execute('INSERT INTO email_outbox(recipient,subject,body,created_at,next_attempt) VALUES(?,?,?,?,?)',
                   (u['email'],subject,text,now(),int(time.time())))
 
@@ -864,10 +867,22 @@ async def email_delivery_scheduler():
         await asyncio.sleep(15)
 
 
+async def channel_delivery_scheduler():
+    await asyncio.sleep(5)
+    while True:
+        try:
+            await integrations.drain(db,validate_url)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print('Integration scheduler error:',type(exc).__name__,flush=True)
+        await asyncio.sleep(15)
+
+
 @asynccontextmanager
 async def lifespan(app):
     init_db()
-    tasks = [asyncio.create_task(run()) for run in (scheduler, heartbeat_scheduler, email_delivery_scheduler)]
+    tasks = [asyncio.create_task(run()) for run in (scheduler, heartbeat_scheduler, email_delivery_scheduler, channel_delivery_scheduler)]
     try:
         yield
     finally:
@@ -1128,6 +1143,62 @@ def displayed_state(monitor, window, clock):
     if monitor['maintenance_last_checked'] and monitor['state'] != 'down':
         return 'pending'
     return monitor['state']
+
+
+class ChannelInput(BaseModel):
+    kind: Literal['slack','discord']
+    label: str = Field(min_length=1,max_length=60)
+    endpoint: str = Field(min_length=10,max_length=500)
+
+
+@app.get('/api/integrations')
+def list_integrations(user=Depends(require_user)):
+    with db() as c:
+        return [dict(row) for row in c.execute("""
+            SELECT a.id,a.kind,a.label,a.created_at,
+                (SELECT MAX(o.sent_at) FROM channel_outbox o WHERE o.channel_id=a.id) AS last_delivered,
+                (SELECT COUNT(*) FROM channel_outbox o WHERE o.channel_id=a.id AND o.sent_at IS NULL AND o.attempts<7) AS pending,
+                (SELECT COUNT(*) FROM channel_outbox o WHERE o.channel_id=a.id AND o.sent_at IS NULL AND o.attempts>=7) AS failed
+            FROM alert_channels a WHERE a.user_id=? ORDER BY a.id
+        """,(user['id'],))]
+
+
+@app.post('/api/integrations',status_code=201)
+def add_integration(body:ChannelInput, user=Depends(require_csrf)):
+    try:
+        endpoint=integrations.endpoint(body.kind,body.endpoint)
+    except ValueError as exc:
+        raise HTTPException(422,str(exc)) from exc
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if c.execute('SELECT COUNT(*) FROM alert_channels WHERE user_id=?',(user['id'],)).fetchone()[0]>=5:
+            raise HTTPException(403,'Maximum five notification channels per account')
+        if not body.label.strip():
+            raise HTTPException(422,'Enter a channel label')
+        channel_id=c.execute('INSERT INTO alert_channels(user_id,kind,label,endpoint,created_at) VALUES(?,?,?,?,?)',
+            (user['id'],body.kind,body.label.strip(),endpoint,now())).lastrowid
+    return {'id':channel_id}
+
+
+@app.delete('/api/integrations/{channel_id}')
+def delete_integration(channel_id:int,user=Depends(require_csrf)):
+    with db() as c:
+        if not c.execute('DELETE FROM alert_channels WHERE id=? AND user_id=?',(channel_id,user['id'])).rowcount:
+            raise HTTPException(404,'Channel not found')
+    return {'ok':True}
+
+
+@app.post('/api/integrations/{channel_id}/test')
+def test_integration(channel_id:int,request:Request,user=Depends(require_csrf)):
+    throttle(request,'integration-test',str(user['id']),5,600)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        if not c.execute('SELECT 1 FROM alert_channels WHERE id=? AND user_id=?',(channel_id,user['id'])).fetchone():
+            raise HTTPException(404,'Channel not found')
+        clock=int(time.time())
+        c.execute('INSERT INTO channel_outbox(channel_id,subject,body,created_at,next_attempt) VALUES(?,?,?,?,?)',
+                  (channel_id,'BeepNado integration test','Your notification channel is configured.',clock,clock))
+    return {'queued':True}
 
 
 class AlarmPreference(BaseModel):
