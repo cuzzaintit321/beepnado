@@ -94,6 +94,34 @@ class BeepNadoTests(unittest.TestCase):
         main.expire_heartbeats(connectivity_ok=True)
         self.assertEqual(len(self.client.get('/api/dashboard').json()['incidents']),1)
 
+    def test_integrations_and_badges(self):
+        self.assertEqual(self.client.post('/api/integrations',headers=self.headers,
+            json={'kind':'slack','label':'bad','endpoint':'https://127.0.0.1/services/a/b/c'}).status_code,422)
+        created=self.client.post('/api/integrations',headers=self.headers,
+            json={'kind':'slack','label':'Ops','endpoint':'https://hooks.slack.com/services/T/B/secret'})
+        self.assertEqual(created.status_code,201,created.text)
+        cid=created.json()['id']
+        channels=self.client.get('/api/integrations').json()
+        self.assertEqual(channels[0]['label'],'Ops')
+        self.assertNotIn('endpoint',channels[0])
+        uid=self.client.get('/api/me').json()['user']['id']
+        with patch.object(main,'email_ready',return_value=False), main.db() as c:
+            main.enqueue_alert(c,uid,'Outage','Example')
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM channel_outbox WHERE channel_id=?',(cid,)).fetchone()[0],1)
+            c.execute('UPDATE users SET email_alerts_enabled=0 WHERE id=?',(uid,))
+            main.enqueue_alert(c,uid,'Disarmed','No message')
+            self.assertEqual(c.execute('SELECT COUNT(*) FROM channel_outbox WHERE channel_id=?',(cid,)).fetchone()[0],1)
+        self.assertEqual(self.client.delete('/api/integrations/'+str(cid),headers=self.headers).status_code,200)
+        self.assertEqual(self.client.get('/api/integrations').json(),[])
+        self.assertEqual(self.client.get('/static/integrations.js').status_code,200)
+        slug='badge-'+os.urandom(5).hex()
+        self.assertEqual(self.client.post('/api/status-page',headers=self.headers,
+            json={'title':'Badge test','slug':slug}).status_code,200)
+        badge=self.client.get('/badge/'+slug+'.svg')
+        self.assertEqual(badge.status_code,200)
+        self.assertIn('Pending',badge.text)
+        self.assertEqual(self.client.get('/badge/nonexistent.svg').status_code,404)
+
     def test_persistent_email_alarm(self):
         settings = self.client.get('/api/alarm-settings')
         self.assertEqual(settings.status_code, 200)
