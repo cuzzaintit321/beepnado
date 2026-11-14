@@ -14,14 +14,16 @@
       const label = monitor.name.replace(/\s+/g, ' ').trim();
       const uncertain = monitor.samples - monitor.passed - monitor.failed;
       lines.push(label);
-      lines.push(monitor.samples
-        ? `${(100 * monitor.passed / monitor.samples).toFixed(2)}% of checks passed (${monitor.passed}/${monitor.samples})`
-        : 'No recorded checks in this period.');
+      const eligible = monitor.eligible_samples ?? monitor.samples;
+      lines.push(eligible
+        ? `${(100 * monitor.passed / eligible).toFixed(2)}% of eligible checks passed (${monitor.passed}/${eligible})`
+        : 'No conclusive samples available in this period.');
+      if (monitor.inconclusive_samples) lines.push(`${monitor.inconclusive_samples} inconclusive checks excluded from the pass rate.`);
       if (monitor.samples) lines.push(`${monitor.failed} confirmed-down checks · ${uncertain} unconfirmed or inconclusive`);
       if (monitor.avg_ms != null) lines.push(`Average passing response time ${monitor.avg_ms} ms`);
       lines.push(`${monitor.incidents} confirmed incident${monitor.incidents === 1 ? '' : 's'} overlapping this period`, '');
     }
-    lines.push('Based on primary checks and heartbeat observations. Maintenance and secondary checks are excluded.');
+    lines.push('Based on primary checks and heartbeat observations. Maintenance, inconclusive samples and secondary checks are excluded from pass rates.');
     lines.push('These are sampled observations. Check pass rates do not measure continuous uptime.');
     if (report.status_path) lines.push('', 'Live status ' + new URL(report.status_path, location.origin).href);
     return lines.join('\n');
