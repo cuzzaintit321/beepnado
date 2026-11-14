@@ -37,7 +37,7 @@ from .network_checks import (
     public_hostname, resolve_public, result as network_result,
 )
 
-from . import integrations, infrastructure, advanced_checks
+from . import integrations, infrastructure, advanced_checks, browser_checks
 from .journeys import JourneyInput, JourneySettings, JourneyTrace, journey_origin, probe_journey
 
 ROOT = Path(__file__).resolve().parent
@@ -227,6 +227,7 @@ def init_db():
         ''')
         integrations.init(c)
         infrastructure.init(c)
+        browser_checks.init(c)
         # Additive migration: preserve all pre-existing accounts and monitor history.
         columns={r['name'] for r in c.execute('PRAGMA table_info(users)')}
         if 'email_verified_at' not in columns:
@@ -962,6 +963,7 @@ async def channel_delivery_scheduler():
                 c.execute('BEGIN IMMEDIATE')
                 integrations.enqueue_escalations(c,SITE_URL,now(),ACTIVE_MONITORS)
                 c.execute('DELETE FROM infrastructure_samples WHERE received_at<?',(int(time.time())-infrastructure.RETENTION,))
+                c.execute('DELETE FROM browser_samples WHERE checked_at<?',(int(time.time())-browser_checks.RETENTION,))
             await integrations.drain(db,validate_url)
         except asyncio.CancelledError:
             raise
@@ -1070,7 +1072,7 @@ def home():
 
 @app.get('/static/{filename}')
 def static(filename:str):
-    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js','outage-alarm.js','integrations.js','infrastructure.js'):raise HTTPException(404)
+    if filename not in ('site.css','app.js','favicon.svg','experience.css','experience.js','monitor-theme.css','monitor-view.js','client-pages.js','outage-alarm.js','integrations.js','infrastructure.js','browser.js'):raise HTTPException(404)
     return FileResponse(ROOT/'static'/filename)
 
 
@@ -1311,6 +1313,88 @@ async def agent_metrics(request:Request):
 @app.get('/agent/linux.py')
 def download_linux_agent():
     return FileResponse(ROOT/'linux_agent.py',media_type='text/plain',filename='beepnado-agent.py')
+
+
+def browser_enabled():
+    return os.getenv('ENABLE_BROWSER_MONITORING','false').lower()=='true' and len(os.getenv('BROWSER_WORKER_TOKEN',''))>=32
+
+
+def require_browser_worker(request):
+    if not browser_enabled() or not hmac.compare_digest(request.headers.get('x-browser-token',''),os.getenv('BROWSER_WORKER_TOKEN','')):
+        raise HTTPException(401,'Browser worker not authorized')
+
+
+@app.get('/api/browser')
+def browser_list(user=Depends(require_user)):
+    with db() as c:
+        return {'enabled':browser_enabled(),'jobs':browser_checks.list_jobs(c,user['id']),
+                'limit':browser_checks.LIMITS.get(user['plan'],1),'interval_seconds':browser_checks.INTERVAL}
+
+
+@app.post('/api/browser',status_code=201)
+async def browser_register(body:browser_checks.BrowserInput,user=Depends(require_csrf)):
+    if not browser_enabled():
+        raise HTTPException(503,'Browser monitoring is not enabled by the operator')
+    if not body.authorized:
+        raise HTTPException(422,'Confirm authorization to monitor this public page')
+    try:
+        await validate_url(body.url)
+        if urlsplit(body.url).query:
+            raise ValueError('Browser monitoring does not accept query strings or credentials')
+    except ValueError as exc:
+        raise HTTPException(422,str(exc)) from exc
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        return {'id':browser_checks.register(c,user['id'],body)}
+
+
+@app.delete('/api/browser/{jid}')
+def browser_delete(jid:int,user=Depends(require_csrf)):
+    with db() as c:
+        browser_checks.owned(c,user['id'],jid)
+        c.execute('DELETE FROM browser_jobs WHERE id=? AND user_id=?',(jid,user['id']))
+    return {'ok':True}
+
+
+@app.get('/api/browser/{jid}/history')
+def browser_history(jid:int,user=Depends(require_user)):
+    with db() as c:
+        return browser_checks.history(c,user['id'],jid)
+
+
+@app.get('/api/browser/{jid}/image/{sample_id}')
+def browser_image(jid:int,sample_id:int,user=Depends(require_user)):
+    with db() as c:
+        browser_checks.owned(c,user['id'],jid)
+        row=c.execute('SELECT screenshot FROM browser_samples WHERE id=? AND job_id=?',(sample_id,jid)).fetchone()
+        if not row or not row['screenshot']:
+            raise HTTPException(404,'Screenshot not found')
+        return Response(row['screenshot'],media_type='image/jpeg',headers={'Cache-Control':'no-store'})
+
+
+@app.post('/internal/browser/claim')
+def browser_claim(request:Request):
+    require_browser_worker(request)
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        return {'job':browser_checks.claim(c)}
+
+
+@app.post('/internal/browser/result')
+async def browser_result(request:Request):
+    require_browser_worker(request)
+    data=bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data)>65536:
+            raise HTTPException(413,'Browser result too large')
+    try:
+        body=browser_checks.BrowserResult.model_validate_json(data)
+    except ValueError:
+        raise HTTPException(422,'Invalid browser result')
+    with db() as c:
+        c.execute('BEGIN IMMEDIATE')
+        return browser_checks.submit(c,body)
 
 
 class ChannelInput(BaseModel):
