@@ -36,6 +36,14 @@ A saved client page can generate a 7-day or 30-day report, even while it is a dr
 
 Email protection is saved in your account and defaults to armed, preserving existing outage/recovery email behavior. The workspace has one **Arm / Disarm** button. Disarming stops queuing new incident emails (messages already queued may still be delivered); monitoring and incident history continue. Browser closure, logout and application restarts do not change the saved preference. Browser sound controls have been removed. SMTP must be configured; the server operator can verify delivery with `docker compose exec web python -m app.mail_check`. A primary server that loses power or internet access cannot send email; use an independent off-site worker to cover this failure mode.
 
+## Advanced mail, file transfer and DNS monitoring
+
+The Add monitor menu includes SMTP (25/587/465), IMAP (143/993), POP3 (110/995), FTP (21/990) and SSH/SFTP endpoint (22) checks. These read the initial protocol greeting over a pinned public address; implicit TLS ports validate the certificate. No login, file transfer, mail delivery, STARTTLS negotiation or SFTP subsystem test is performed. A successful greeting only proves the listening service responded.
+
+Email health combines MX routing, SPF presence and DMARC policy checks, plus DKIM public key presence when a selector is specified. Individual SPF, DKIM and DMARC monitors are available. DNSSEC checks whether the public validating resolver returns an authenticated A answer. These checks are limited record diagnostics, not full email deliverability or cryptographic policy audits. Existing DNS monitors already support MX and expected record matching. DNS health runs hourly; blacklist checks run every six hours.
+
+DNSBL beta checks are disabled unless ENABLE_DNSBL=true is configured by the operator. They query selected Spamhaus ZEN (hostname-resolved IPv4) or DBL (domain) zones; verify provider terms and resolver access before enabling. Recognized positive listing answers can trigger incidents; negative, refused or ambiguous answers are inconclusive, not proof of a clean reputation. This is not a complete multi-provider blacklist service. DNS health and reputation observations are not substitutes for checking with the provider.
+
 ## Unified public pricing and billing
 
 Free: 50 monitors / 300-second primary target. Pro: 50 / 60 seconds, $9 monthly or $90 annually. Team: 150 / 30 seconds, $29 or $290. Scale: 300 / 15 seconds, $59 or $590. These are scheduler targets, not guarantees; capacity must be load-tested before commercial rollout. The workspace reads the catalog from the API. Server limits are 1/5/25/50 respectively.
