@@ -147,6 +147,23 @@
     ].filter(Boolean).join(' · '));
   }
 
+  const timingFields = [['dns_ms','DNS / validation'],['tcp_ms','TCP connect'],['tls_ms','TLS handshake'],['ttfb_ms','Request to first byte'],['headers_ms','Start to headers'],['body_ms','Remaining body read'],['total_ms','Total measured request']];
+  function timingLines(check) {
+    const t=check?.timings;
+    if(!t)return [];
+    return timingFields.filter(([key])=>Number.isFinite(t[key])).map(([key,label])=>label+': '+t[key]+' ms');
+  }
+  function timingPanel(check, checks) {
+    const t=check?.timings;
+    const rows=timingLines(check);
+    const samples=checks.filter(c=>c.region==='primary' && !c.inconclusive && Number.isFinite(c.timings?.headers_ms)).slice().reverse();
+    if(!rows.length && !samples.length)return '';
+    const max=Math.max(1,...samples.map(c=>c.timings.headers_ms));
+    const points=samples.map((c,i)=> (12+i*296/Math.max(1,samples.length-1)).toFixed(1)+','+(90-75*c.timings.headers_ms/max).toFixed(1)).join(' ');
+    const chart=samples.length?'<h4>Recent primary header latency</h4><svg viewBox="0 0 320 105" width="100%" role="img" aria-label="Measured header latency over '+samples.length+' samples"><path d="M12 15V90H308" stroke="currentColor" opacity=".3" fill="none"/><polyline points="'+points+'" stroke="#f97343" stroke-width="2" fill="none"/>'+samples.map((c,i)=>'<circle cx="'+(12+i*296/Math.max(1,samples.length-1)).toFixed(1)+'" cy="'+(90-75*c.timings.headers_ms/max).toFixed(1)+'" r="3" fill="#f97343"><title>'+tidy(fmt(c.checked_at)+' · '+c.timings.headers_ms+' ms')+'</title></circle>').join('')+'</svg><p class="bn-investigator-note">Scale: 0–'+max+' ms · '+samples.length+' recorded samples, not browser page load time.</p>':'';
+    return '<h3>HTTP performance</h3>'+(rows.length?'<ul class="bn-public-evidence">'+rows.map(x=>'<li>'+tidy(x)+'</li>').join('')+'</ul><p class="bn-investigator-note">'+(t.route==='local'?'Local routing: not external network performance. ':'')+(Number.isFinite(t.body_bytes)?'Measured '+t.body_bytes+' response body bytes. ':'Full body measurement unavailable or not attempted. ')+'Timings overlap; do not add header and first-byte durations.</p>':'')+chart;
+  }
+
   function investigateMonitor(m, incident, observations) {
     const checks=observations.filter(c=>Number(c.monitor_id)===Number(m.id)).slice(0,10);
     const heartbeat=m.kind==='heartbeat';
@@ -182,6 +199,7 @@
       'Recorded error: '+String(evidence?.error||'None').replace(/[\r\n]/g,' ').slice(0,120),
       ...(heartbeat ? [] : ['Public probes:', ...(external.length ? external : ['No recent public observation.'])]),
       ...journeyRuns.flatMap(run => [run.label, ...run.lines]),
+      ...timingLines(evidence),
       'Recent checks:',...(lines.length?lines:['No observations recorded.']),
       'Interpretation is not a confirmed root cause. Same-host checks cannot detect whole-server or Internet outages.'
     ].join('\n');
@@ -198,6 +216,7 @@
         : '<p>No recent public observation.</p>')) +
       journeyRuns.map(run => '<h3>' + tidy(run.label) + '</h3><ol class="bn-public-evidence">' +
         run.lines.map(line => '<li>' + tidy(line) + '</li>').join('') + '</ol>').join('')+
+      timingPanel(evidence, checks)+
       '<h3>Recent recorded checks</h3><div class="bn-investigator-history">'+history+'</div>'+
       '<p class="bn-investigator-note">Based only on recorded observations; no simulated data. If monitoring from the same server, a total server or network outage will not be detected independently.</p>'+
       '<div class="bn-investigator-actions"><button type="button" class="bn-btn bn-btn-primary" data-investigator-copy>Copy client report</button><button type="button" class="bn-btn bn-btn-quiet" data-investigator-close>Close</button></div>';
