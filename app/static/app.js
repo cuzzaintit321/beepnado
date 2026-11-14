@@ -81,7 +81,7 @@ function selectView(v){view=v;renderView();}
 function renderView(){
  if(!dash)return;
  document.querySelectorAll('.side-link').forEach(e=>e.classList.toggle('active',e.dataset.view===view));
- const names={overview:'Overview',monitors:'Website monitors',incidents:'Incident history',alerts:'Alert feed',integrations:'Integrations',infrastructure:'Infrastructure',browser:'Browser monitoring',teams:'Team workspace',status:'Public status page',clients:'Client pages',billing:'Plan & billing'};
+ const names={overview:'Overview',monitors:'Website monitors',incidents:'Incident history',alerts:'Alert feed',integrations:'Integrations',infrastructure:'Infrastructure',browser:'Browser monitoring',teams:'Team workspace',branding:'Status branding',status:'Public status page',clients:'Client pages',billing:'Plan & billing'};
  $('view-heading').textContent=names[view]||'Overview';$('view-crumb').textContent=(names[view]||'Overview').toUpperCase();
  if(view==='overview')return overview();
  if(view==='monitors')return monitors();
@@ -91,6 +91,7 @@ function renderView(){
  if(view==='infrastructure')return renderInfrastructure();
  if(view==='browser')return renderBrowser();
  if(view==='teams')return renderTeams();
+ if(view==='branding')return renderBranding();
  if(view==='status')return statusSettings();
  if(view==='clients')return renderClientPages();
  if(view==='billing')return user.workspace_role==='owner'?billing():renderTeams();
@@ -152,9 +153,9 @@ async function openCheckout(plan){
  if(!launchCapabilities?.checkout_options?.includes(plan+':'+billingCycle)){toast('This checkout option is not yet available.');return;}
  try{const d=await api('/api/billing/checkout',{method:'POST',body:JSON.stringify({plan,cycle:billingCycle})});location.href=d.url}catch(e){toast(e.message)}
 }
-async function renderPublicStatus(slug){
+async function renderPublicStatus(slug,custom=false){
  try{
-   const s=await api('/api/public-status/'+encodeURIComponent(slug));
+   const s=await api(custom?'/api/custom-status':'/api/public-status/'+encodeURIComponent(slug));
    const bad=s.monitors.some(m=>m.state==='down');
    const maintenance=s.monitors.some(m=>m.state==='maintenance');
    const pending=s.monitors.some(m=>!['up','maintenance'].includes(m.state));
@@ -162,7 +163,7 @@ async function renderPublicStatus(slug){
      :s.primary_connectivity_unverified?'◌ Monitoring temporarily unavailable — service health cannot be verified'
      :maintenance?'◌ Planned maintenance is in progress'
      :pending?'◌ Some services have not confirmed a healthy state':'✓ All monitored services are operational';
-   const rows = s.monitors.map(m => {
+   const rows = [...s.monitors].sort((a,b)=>(a.group||'').localeCompare(b.group||'')).map(m => {
      const window = m.maintenance;
      const schedule = window && (m.state === 'maintenance'
        ? 'Ends ' + fmt(window.ends_at)
@@ -172,14 +173,17 @@ async function renderPublicStatus(slug){
        <td>${fmt(m.last_checked)}</td></tr>`;
    }).join('');
    $('status-body').innerHTML=`<span class="kicker">SERVICE HEALTH</span><h1>${esc(s.title)}</h1><p>Last loaded: ${fmt(s.observed_at)}</p><div class="status-banner ${bad?'alert':''}">${message}</div><div class="panel"><h3>Services</h3>${s.monitors.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Status</th><th>Last checked</th></tr></thead><tbody>${rows}</tbody></table></div>`:empty('No public services listed','This status page has no active services to show.')}</div><div class="panel"><h3>Recent incidents</h3>${s.incidents.length?`<div class="table-wrap"><table><thead><tr><th>Service</th><th>Opened</th><th>Recovered</th></tr></thead><tbody>${s.incidents.map(i=>`<tr><td>${esc(i.monitor)}</td><td>${fmt(i.opened_at)}</td><td>${i.resolved_at?fmt(i.resolved_at):'Ongoing'}</td></tr>`).join('')}</tbody></table></div>`:empty('No incidents recorded','This page only displays incidents already observed by the monitor.')}</div><p class="billing-note">Displayed values reflect the latest recorded monitor observations.</p>`;
+   enhancePublicStatus(s,custom);
  }catch(e){$('status-body').innerHTML=`<h1>Status page unavailable</h1><p>${esc(e.message)}</p>`}
 }
 async function init(){
+ if(document.body.dataset.customStatus==='true'){show('status');await renderPublicStatus('',true);setInterval(()=>{if(!document.hidden&&!document.querySelector('#status-body form :focus'))renderPublicStatus('',true);},30000);return;}
+ if(await statusSubscriptionAction())return;
  const statusMatch=location.pathname.match(/^\/s\/([a-z0-9-]+)$/);
  if(statusMatch){
    show('status');
    await renderPublicStatus(statusMatch[1]);
-   setInterval(()=>{if(!document.hidden)renderPublicStatus(statusMatch[1]);},30000);
+   setInterval(()=>{if(!document.hidden&&!document.querySelector('#status-body form :focus'))renderPublicStatus(statusMatch[1]);},30000);
    return;
  }
  try{launchCapabilities=await api('/api/availability')}catch(e){console.warn('Launch status unavailable')}
