@@ -232,6 +232,9 @@ def init_db():
         for column in ('detail', 'journey_trace'):
             if column not in check_columns:
                 c.execute(f'ALTER TABLE checks ADD COLUMN {column} TEXT')
+        if 'inconclusive' not in check_columns:
+            c.execute('ALTER TABLE checks ADD COLUMN inconclusive INTEGER NOT NULL DEFAULT 0')
+            c.execute("UPDATE checks SET inconclusive=1 WHERE state='degraded' AND (detail LIKE '%connectivity is unverified%' OR error LIKE '%monitoring network could not reach%')")
         incident_columns = {r['name'] for r in c.execute('PRAGMA table_info(incidents)')}
         for column in ('opening_evidence', 'recovery_evidence'):
             if column not in incident_columns:
@@ -595,28 +598,30 @@ egress_status = None
 egress_lock = asyncio.Lock()
 
 
-async def public_egress_available():
+async def public_egress_available(*, fresh_after=None):
     global egress_status
     async with egress_lock:
-        if egress_status and time.monotonic() < egress_status[0]:
+        if egress_status and time.monotonic() < egress_status[0] and (
+                fresh_after is None or egress_status[2] >= fresh_after):
             return egress_status[1]
 
         async def check(url):
             try:
                 async with asyncio.timeout(6):
                     return (await probe(url, public_only=True))['http_code'] is not None
-            except TimeoutError:
+            except (TimeoutError, OSError, ValueError):
                 return False
 
+        started = time.monotonic()
         healthy = any(await asyncio.gather(*(check(url) for url in EGRESS_PROBES)))
-        egress_status = (time.monotonic() + 20, healthy)
+        egress_status = (time.monotonic() + 20, healthy, started)
         return healthy
 
 
 async def account_for_probe_network(observation):
-    # HTTP responses and protocol replies are evidence from the target itself.
-    if (observation['state'] == 'down' and observation['http_code'] is None and not observation.get('detail')
-            and not await public_egress_available()):
+    # Never trust a positive connectivity result from before a failed check.
+    # Even an HTTP error may originate from a local proxy during a network outage.
+    if observation['state'] == 'down' and not await public_egress_available(fresh_after=time.monotonic()):
         return network_result(
             error='The monitoring network could not reach either public reference host',
             detail='Check inconclusive while public connectivity is unverified', unknown=True,
@@ -650,10 +655,11 @@ def record_check(monitor_id, result):
 
 def store_check(c, monitor_id, region, timestamp, state, result):
     trace = result.get('journey_trace')
-    c.execute('''INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error,detail,journey_trace)
-                 VALUES(?,?,?,?,?,?,?,?,?,?)''',
+    c.execute('''INSERT INTO checks(monitor_id,region,checked_at,state,http_code,response_ms,cert_days,error,detail,journey_trace,inconclusive)
+                 VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
               (monitor_id, region, timestamp, state, result['http_code'], result['response_ms'],
-               result['cert_days'], result['error'], result.get('detail'), json.dumps(trace) if trace else None))
+               result['cert_days'], result['error'], result.get('detail'), json.dumps(trace) if trace else None,
+                int(result['state'] == 'unknown')))
 
 
 def incident_evidence(observation, timestamp, state, region):
@@ -784,21 +790,35 @@ def heartbeat_observation(c, monitor, state, error=None):
     }, 'heartbeat')
 
 
-def expire_heartbeats():
+def expire_heartbeats(*, connectivity_ok=True, reset_overdue=False):
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
         overdue = c.execute('SELECT m.* ' + ACTIVE_MONITORS + '''
             AND m.heartbeat_interval_s IS NOT NULL AND m.state!='down' AND m.heartbeat_due_at<?
         ''', (int(time.time()),)).fetchall()
         for monitor in overdue:
-            heartbeat_observation(c, monitor, 'down', 'No heartbeat arrived before the deadline')
+            if not connectivity_ok:
+                if monitor['error'] != 'Monitoring connectivity unavailable; heartbeat status inconclusive':
+                    heartbeat_observation(c, monitor, 'unknown', 'Monitoring connectivity unavailable; heartbeat status inconclusive')
+            elif reset_overdue:
+                c.execute('UPDATE monitors SET heartbeat_due_at=? WHERE id=?',
+                          (int(time.time()) + monitor['heartbeat_interval_s'] + monitor['heartbeat_grace_s'], monitor['id']))
+            else:
+                heartbeat_observation(c, monitor, 'down', 'No heartbeat arrived before the deadline')
 
 
 async def heartbeat_scheduler():
+    interrupted = True
     while True:
         try:
-            await asyncio.to_thread(expire_heartbeats)
+            healthy = await public_egress_available(fresh_after=time.monotonic())
+            await asyncio.to_thread(expire_heartbeats, connectivity_ok=healthy,
+                                    reset_overdue=healthy and interrupted)
+            interrupted = not healthy
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
+            interrupted = True
             print('Heartbeat scheduler error:', type(exc).__name__, flush=True)
         await asyncio.sleep(10)
 
@@ -1152,7 +1172,7 @@ def dashboard(user=Depends(require_user)):
             SELECT ch.monitor_id, COUNT(*) AS total,
                    SUM(CASE WHEN ch.state='up' THEN 1 ELSE 0 END) AS passed
               FROM checks ch JOIN monitors m ON m.id=ch.monitor_id
-             WHERE m.user_id=? AND ch.region='primary' AND ch.checked_at>=?
+             WHERE m.user_id=? AND ch.region='primary' AND ch.inconclusive=0 AND ch.checked_at>=?
              GROUP BY ch.monitor_id''',(user['id'],cutoff))}
         clock = now()
         windows = scheduled_maintenance(c, user['id'], clock)
@@ -1395,8 +1415,7 @@ def receive_heartbeat(request: Request):
         if last is not None and last > clock - 5:
             return Response(status_code=204)
         overdue = monitor['heartbeat_due_at'] < clock
-        if monitor['state'] != 'down' and overdue:
-            heartbeat_observation(c, monitor, 'down', 'No heartbeat arrived before the deadline')
+        # A late arrival alone cannot prove a failed job: our ingress may have been offline.
         if monitor['state'] != 'up' or overdue or (
             clock - datetime.fromisoformat(monitor['last_checked']).timestamp() >= 60
         ):
@@ -1600,8 +1619,10 @@ def client_report(page_id: int, response: Response, days: Literal['7', '30'] = '
             raise HTTPException(404, 'Client page unavailable')
         monitors = [dict(row) for row in c.execute('''
             SELECT m.name,COUNT(ch.id) AS samples,
-                   COUNT(CASE WHEN ch.state='up' THEN 1 END) AS passed,
-                   COUNT(CASE WHEN ch.state='down' THEN 1 END) AS failed,
+                   COUNT(CASE WHEN ch.inconclusive=0 THEN 1 END) AS eligible_samples,
+                   COUNT(CASE WHEN ch.inconclusive=1 THEN 1 END) AS inconclusive_samples,
+                   COUNT(CASE WHEN ch.state='up' AND ch.inconclusive=0 THEN 1 END) AS passed,
+                   COUNT(CASE WHEN ch.state='down' AND ch.inconclusive=0 THEN 1 END) AS failed,
                    ROUND(AVG(CASE WHEN ch.state='up' THEN ch.response_ms END)) AS avg_ms,
                    (SELECT COUNT(*) FROM incidents i WHERE i.monitor_id=m.id AND i.opened_at<=?
                       AND (i.resolved_at IS NULL OR i.resolved_at>?)) AS incidents
