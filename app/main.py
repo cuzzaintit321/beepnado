@@ -1315,6 +1315,11 @@ def download_linux_agent():
     return FileResponse(ROOT/'linux_agent.py',media_type='text/plain',filename='beepnado-agent.py')
 
 
+@app.get('/agent/windows.ps1')
+def download_windows_agent():
+    return FileResponse(ROOT/'windows_agent.ps1',media_type='text/plain',filename='beepnado-agent.ps1')
+
+
 def browser_origins():
     return {v.strip().lower().rstrip('/') for v in os.getenv('BROWSER_ALLOWED_ORIGINS','').split(',') if v.strip()}
 
