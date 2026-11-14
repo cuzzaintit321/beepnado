@@ -236,7 +236,7 @@
       <div class="bn-status-trio"><div><strong class="bn-color-down">${n.down}</strong><small>Down</small></div><div><strong class="bn-color-up">${n.up}</strong><small>Up</small></div><div><strong class="bn-color-pending">${n.degraded + n.pending}</strong><small>Pending</small></div></div>
       ${n.maintenance ? '<p class="bn-maintenance-text">' + n.maintenance + ' in planned maintenance</p>' : ''}
       <div class="bn-snapshot-footer">Monitoring <strong>${n.total}</strong> of <strong>${num(dash?.limit)}</strong> allowed monitors</div></section>
-      <section class="bn-panel bn-facts"><h3>Check history</h3><div class="bn-fact"><span>30-day check success rate</span><strong>${percent}</strong></div><div class="bn-fact"><span>30-day primary checks</span><strong>${samples.toLocaleString()}</strong></div><div class="bn-fact"><span>Recent incident records</span><strong>${(dash?.incidents || []).length}${(dash?.incidents || []).length === 30 ? '+' : ''}</strong></div><p>Check success rates exclude planned maintenance. They measure recorded checks.</p></section>`;
+      <section class="bn-panel bn-facts"><h3>Check history</h3><div class="bn-fact"><span>30-day check success rate</span><strong>${percent}</strong></div><div class="bn-fact"><span>30-day primary checks</span><strong>${samples.toLocaleString()}</strong></div><div class="bn-fact"><span>Recent incident records</span><strong>${(dash?.incidents || []).length}${(dash?.incidents || []).length === 30 ? '+' : ''}</strong></div><p>Check success rates exclude planned maintenance and inconclusive checks. They measure recorded samples.</p></section>`;
   }
 
   function ruleFields(m={}, disabled=false) {
@@ -492,7 +492,7 @@
   function summaryStrip() {
     const n = counts();
     const connectionNotice = dash?.primary_connectivity_unverified
-      ? '<p class="bn-network-notice" role="status">Primary connection unverified. Network failures are marked inconclusive while public connectivity cannot be verified.</p>' : '';
+      ? '<p class="bn-network-notice" role="status">Monitoring temporarily unavailable. New failures are inconclusive until public connectivity is verified.</p>' : '';
     return `${connectionNotice}<div class="bn-summary-strip" aria-label="Monitor totals">
       <div><span>Monitors</span><strong>${n.total}<small> / ${num(dash?.limit)}</small></strong></div>
       <div><span>Operational</span><strong class="bn-color-up">${n.up}</strong></div>
