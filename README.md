@@ -36,6 +36,16 @@ A saved client page can generate a 7-day or 30-day report, even while it is a dr
 
 Email protection is saved in your account and defaults to armed, preserving existing outage/recovery email behavior. The workspace has one **Arm / Disarm** button. Disarming stops queuing new incident emails (messages already queued may still be delivered); monitoring and incident history continue. Browser closure, logout and application restarts do not change the saved preference. Browser sound controls have been removed. SMTP must be configured; the server operator can verify delivery with `docker compose exec web python -m app.mail_check`. A primary server that loses power or internet access cannot send email; use an independent off-site worker to cover this failure mode.
 
+## Notification integrations and status badges
+
+Open **Integrations** in the signed-in workspace to connect up to five Slack or Discord incoming webhooks per account. Create the webhook in the provider, paste its secret URL, and send a test. The API never returns saved webhook URLs. They are stored in the server database, so protect database backups as credentials. Automatic incident delivery follows the existing Arm/Disarm preference; explicit tests remain available. Queued deliveries retry with backoff and may be delivered more than once if a provider accepts a request but its response is lost. Failed or expired deliveries require operator attention.
+
+Public status pages offer a copyable SVG badge embed at `/badge/{slug}.svg`. Only published status pages can be embedded. It reflects the latest observed status, not a continuous SLA.
+
+## Optional strict independent outage confirmation
+
+Run the updated worker on a physically independent network and configure matching WORKER_TOKEN values. Set WORKER_REGION=offsite and WORKER_INTERVAL=30 on the worker. Only after verifying that the worker is reporting current results, set CONFIRM_REGION=offsite in the primary server's environment and recreate the web container. The primary monitor then requires a matching failed observation received from that named region in the preceding 120 seconds before a primary failure can count toward an incident. Updated workers use the current monitor rules and send a configuration revision; old or mismatched observations cannot confirm an outage. Missing remote evidence is inconclusive, so strict mode can delay or suppress real outage alerts if the worker is unavailable or slow. Heartbeats still use their separate interruption guard. This mode does not supply a cloud host or keep the primary API available during a home-network outage. Deploy independent infrastructure separately.
+
 ## False-outage protection
 
 Before a failed website, API, journey, or network probe can count toward an outage, BeepNado checks public connectivity against two independent HTTPS reference hosts. A cached healthy result from before a failure cannot confirm the new failure. If both references are unreachable, the result is inconclusive; it cannot open or resolve an outage, and is excluded from check pass-rate calculations. Previously confirmed incidents remain open until a successful observation. Historical samples are preserved; older samples with recognizable connectivity-guard markers are classified as inconclusive by an additive migration.
