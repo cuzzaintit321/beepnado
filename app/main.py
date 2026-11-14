@@ -977,6 +977,37 @@ async def email_delivery_scheduler():
         await asyncio.sleep(15)
 
 
+async def status_branding_scheduler():
+    await asyncio.sleep(10)
+    while True:
+        try:
+            with db() as c:
+                c.execute('BEGIN IMMEDIATE')
+                clock=int(time.time())
+                c.execute('DELETE FROM status_daily_views WHERE day<?',(clock//86400-30,))
+                c.execute('DELETE FROM status_subscribers WHERE confirmed_at IS NULL AND expires_at<?',(clock,))
+                domains=[dict(r) for r in c.execute('SELECT id,hostname,token FROM status_domains WHERE activated_at IS NOT NULL AND verified_at<? ORDER BY verified_at LIMIT 5',(clock-21600,))]
+                if email_ready() and os.getenv('ENABLE_STATUS_SUBSCRIBER_MAIL','false').lower()=='true':
+                    # Move only a small batch to the normal SMTP outbox each cycle.
+                    for item in branding.mail_batch(c,SITE_URL):
+                        c.execute('INSERT INTO email_outbox(recipient,subject,body,created_at,next_attempt) VALUES(?,?,?,?,?)',
+                                  (item['email'],item['subject'],item['message'],now(),clock))
+                        c.execute('DELETE FROM status_mail_jobs WHERE id=?',(item['id'],))
+            for item in domains:
+                try:
+                    valid=await verify_domain_txt(item['hostname'],item['token'])
+                    with db() as c:
+                        c.execute('UPDATE status_domains SET verified_at=?,activated_at=CASE WHEN ? THEN activated_at ELSE NULL END WHERE id=? AND token=?',
+                                  (int(time.time()) if valid else None,valid,item['id'],item['token']))
+                except Exception:
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            print('Status branding scheduler deferred',flush=True)
+        await asyncio.sleep(60)
+
+
 async def channel_delivery_scheduler():
     await asyncio.sleep(5)
     while True:
@@ -997,7 +1028,7 @@ async def channel_delivery_scheduler():
 @asynccontextmanager
 async def lifespan(app):
     init_db()
-    tasks = [asyncio.create_task(run()) for run in (scheduler, heartbeat_scheduler, email_delivery_scheduler, channel_delivery_scheduler)]
+    tasks = [asyncio.create_task(run()) for run in (scheduler, heartbeat_scheduler, email_delivery_scheduler, channel_delivery_scheduler,status_branding_scheduler)]
     try:
         yield
     finally:
@@ -2151,8 +2182,18 @@ def brand_announce(kind:Literal['primary','client'],pid:int,body:branding.Announ
         _,b=branding.page(c,owner,kind,pid,True)
         if c.execute('SELECT COUNT(*) FROM status_announcements WHERE brand_id=?',(b['id'],)).fetchone()[0]>=100:
             raise HTTPException(403,'Announcement limit reached; remove an older announcement')
-        c.execute('INSERT INTO status_announcements(brand_id,title,body,kind,created_at) VALUES(?,?,?,?,?)',
-                  (b['id'],body.title.strip(),body.body.strip(),body.kind,int(time.time())))
+        if body.notify_subscribers:
+            if not email_ready() or os.getenv('ENABLE_STATUS_SUBSCRIBER_MAIL','false').lower()!='true':
+                raise HTTPException(503,'Announcement email is not enabled by the operator')
+            if kind=='client' and not c.execute('SELECT 1 FROM client_pages WHERE id=? AND published=1',(pid,)).fetchone():
+                raise HTTPException(409,'Publish the client page before emailing subscribers')
+            if c.execute('SELECT 1 FROM status_announcements WHERE brand_id=? AND created_at>?',(b['id'],int(time.time())-900)).fetchone():
+                raise HTTPException(429,'Wait 15 minutes between announcements before emailing subscribers')
+        aid=c.execute('INSERT INTO status_announcements(brand_id,title,body,kind,created_at) VALUES(?,?,?,?,?)',
+                  (b['id'],body.title.strip(),body.body.strip(),body.kind,int(time.time()))).lastrowid
+        if body.notify_subscribers:
+            plan=c.execute('SELECT plan FROM users WHERE id=?',(owner,)).fetchone()[0]
+            branding.queue_announcement(c,b['id'],aid,plan)
         teams.audit(c,owner,actor['id'],'Published status announcement')
     return {'ok':True}
 
@@ -2211,7 +2252,9 @@ async def brand_verify(kind:Literal['primary','client'],pid:int,did:int,request:
         current=branding.domain_owned(c,owner,kind,pid,did)
         if current['token']!=row['token']:
             raise HTTPException(409,'Domain registration changed')
-        c.execute('UPDATE status_domains SET verified_at=? WHERE id=?',(int(time.time()),did))
+        allowed={x.strip().lower() for x in os.getenv('STATUS_CUSTOM_HOSTS','').split(',') if x.strip()}
+        clock=int(time.time())
+        c.execute('UPDATE status_domains SET verified_at=?,activated_at=? WHERE id=?',(clock,clock if current['hostname'] in allowed else None,did))
         teams.audit(c,owner,actor['id'],'Verified custom status hostname')
     return {'ok':True}
 
@@ -2227,8 +2270,7 @@ def brand_delete_domain(kind:Literal['primary','client'],pid:int,did:int,request
     return {'ok':True}
 
 
-@app.get('/custom-status')
-def branded_custom_status(request:Request):
+def custom_status_slug(request:Request):
     # Only the explicitly configured reverse proxy may route this endpoint.
     if not TRUSTED_PROXY_IP or not request.client or request.client.host!=TRUSTED_PROXY_IP:
         raise HTTPException(404,'Status page unavailable')
@@ -2236,13 +2278,29 @@ def branded_custom_status(request:Request):
     with db() as c:
         slug=branding.domain_target(c,hostname)
     if not slug:raise HTTPException(404,'Status page unavailable')
-    return RedirectResponse('/s/'+slug,status_code=302)
+    return slug
+
+
+@app.get('/api/custom-status')
+def custom_status_data(request:Request,response:Response):
+    return status_page(custom_status_slug(request),response)
+
+
+@app.get('/custom-status-page')
+def custom_status_html(request:Request):
+    slug=custom_status_slug(request)
+    with db() as c:
+        row=public_status_page(c,slug)
+        _,_,b=branding.public(c,row['user_id'],row['page_id'])
+        if b: branding.record_view(c,b['id'])
+    return FileResponse(ROOT/'static'/'custom-status.html',headers={'X-Robots-Tag':'noindex'})
 
 
 @app.post('/api/public-status/{slug}/subscribe')
 def status_subscribe(slug:str,body:branding.SubscriberInput,request:Request):
-    if not email_ready():raise HTTPException(503,'Email subscriptions unavailable')
+    if not email_ready() or os.getenv('ENABLE_STATUS_SUBSCRIBER_MAIL','false').lower()!='true':raise HTTPException(503,'Email subscriptions unavailable')
     throttle(request,'status-subscribe','*',10,3600)
+    throttle(request,'status-subscribe-address',body.email.strip().lower(),2,3600)
     with db() as c:
         c.execute('BEGIN IMMEDIATE')
         row=public_status_page(c,slug)
@@ -2433,7 +2491,7 @@ def status_page(slug: str, response: Response):
             SELECT m.name AS monitor,i.opened_at,i.resolved_at
             FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE 1=1
         ''' + STATUS_MONITOR_SCOPE + ' ORDER BY i.id DESC LIMIT 5', scope)]
-    return {'title':row['title'],'monitors':mons,'incidents':incidents,'observed_at':clock,'branding':brand,'announcements':announcements,
+    return {'title':row['title'],'monitors':mons,'incidents':incidents,'observed_at':clock,'branding':brand,'announcements':announcements,'subscribe_enabled':email_ready() and os.getenv('ENABLE_STATUS_SUBSCRIBER_MAIL','false').lower()=='true','slug':slug,
             'primary_connectivity_unverified': bool(egress_status and not egress_status[1])}
 
 
@@ -2459,8 +2517,9 @@ def public_badge(slug:str):
 def status_html(slug:str):
     with db() as c:
         row=public_status_page(c, slug)
-        _,_,b=branding.public(c,row['user_id'],row['page_id'])
-        if b: branding.record_view(c,b['id'])
+        pid=row['page_id'] or c.execute('SELECT id FROM status_pages WHERE user_id=?',(row['user_id'],)).fetchone()[0]
+        _,b=branding.page(c,row['user_id'],'client' if row['page_id'] else 'primary',pid,True)
+        branding.record_view(c,b['id'])
     return FileResponse(ROOT/'static'/'index.html', headers={
         'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex',
     })
