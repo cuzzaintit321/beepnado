@@ -93,6 +93,8 @@ class ClientPageTests(unittest.TestCase):
             ]:
                 c.execute('INSERT INTO checks(monitor_id,region,checked_at,state,response_ms) VALUES(?,?,?,?,?)',
                           (monitor, region, (clock - timedelta(days=days)).isoformat(timespec='seconds'), state, ms))
+            c.execute("INSERT INTO checks(monitor_id,region,checked_at,state,inconclusive) VALUES(?,'primary',?,'degraded',1)",
+                      (monitor, (clock - timedelta(days=1)).isoformat(timespec='seconds')))
             c.execute("INSERT INTO checks(monitor_id,region,checked_at,state) VALUES(?,'primary',?,'up')",
                       (self.monitors['Internal site'], main.now()))
             opened = (clock - timedelta(days=10)).isoformat(timespec='seconds')
@@ -104,10 +106,10 @@ class ClientPageTests(unittest.TestCase):
         self.assertEqual(response.headers['Cache-Control'], 'no-store')
         self.assertEqual(response.json()['status_path'], '/s/client-status')
         self.assertEqual(response.json()['monitors'], [
-            {'name': 'Client site', 'samples': 4, 'passed': 2, 'failed': 1, 'avg_ms': 100, 'incidents': 1},
+            {'name': 'Client site', 'samples': 5, 'eligible_samples': 4, 'inconclusive_samples': 1, 'passed': 2, 'failed': 1, 'avg_ms': 100, 'incidents': 1},
         ])
         self.assertEqual(self.owner.get(page + '/report?days=30').json()['monitors'], [
-            {'name': 'Client site', 'samples': 5, 'passed': 3, 'failed': 1, 'avg_ms': 200, 'incidents': 1},
+            {'name': 'Client site', 'samples': 6, 'eligible_samples': 5, 'inconclusive_samples': 1, 'passed': 3, 'failed': 1, 'avg_ms': 200, 'incidents': 1},
         ])
         self.assertEqual(self.owner.get(page + '/report?days=90').status_code, 422)
         with main.db() as c:
