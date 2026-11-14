@@ -1315,8 +1315,13 @@ def download_linux_agent():
     return FileResponse(ROOT/'linux_agent.py',media_type='text/plain',filename='beepnado-agent.py')
 
 
+def browser_origins():
+    return {v.strip().lower().rstrip('/') for v in os.getenv('BROWSER_ALLOWED_ORIGINS','').split(',') if v.strip()}
+
+
 def browser_enabled():
-    return os.getenv('ENABLE_BROWSER_MONITORING','false').lower()=='true' and len(os.getenv('BROWSER_WORKER_TOKEN',''))>=32
+    return (os.getenv('ENABLE_BROWSER_MONITORING','false').lower()=='true'
+            and len(os.getenv('BROWSER_WORKER_TOKEN',''))>=32 and bool(browser_origins()))
 
 
 def require_browser_worker(request):
@@ -1339,8 +1344,11 @@ async def browser_register(body:browser_checks.BrowserInput,user=Depends(require
         raise HTTPException(422,'Confirm authorization to monitor this public page')
     try:
         await validate_url(body.url)
-        if urlsplit(body.url).query:
+        parsed=urlsplit(body.url)
+        if parsed.query:
             raise ValueError('Browser monitoring does not accept query strings or credentials')
+        if parsed.scheme+'://'+parsed.hostname.lower() not in browser_origins():
+            raise ValueError('Origin is not approved by the browser monitoring operator')
     except ValueError as exc:
         raise HTTPException(422,str(exc)) from exc
     with db() as c:
