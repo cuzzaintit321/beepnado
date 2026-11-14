@@ -70,7 +70,7 @@
       m.max_response_ms && '≤ ' + m.max_response_ms + ' ms'].filter(Boolean).join(' · ');
     return `<article class="bn-monitor-row" aria-label="${tidy(m.name)}: ${tidy(prettyState(state))}">
       <div class="bn-monitor-identity"><span class="bn-state-dot bn-${tidy(state)}" aria-hidden="true"></span>
-        <div class="bn-monitor-title"><strong>${tidy(m.name)}</strong><span class="bn-host" title="${tidy(target)}">${tidy(target)}</span>${rules ? '<span class="bn-host">' + tidy(rules) + '</span>' : ''}</div></div>
+        <div class="bn-monitor-title"><strong>${tidy(m.name)}</strong><span class="bn-host" title="${tidy(target)}">${tidy(target)}</span>${rules ? '<span class="bn-host">' + tidy(rules) + '</span>' : ''}${m.client_group||m.tags?'<span class="bn-host">'+tidy([m.client_group,m.tags].filter(Boolean).join(' · '))+'</span>':''}</div></div>
       <div class="bn-monitor-meta"><span>${pill(state)}</span><small>${tidy(timing)}</small>${notice ? '<small class="bn-maintenance-text">' + tidy(notice) + '</small>' : ''}
         ${m.detail ? '<small class="bn-check-detail" title="' + tidy(m.detail) + '">' + tidy(m.detail) + '</small>' : ''}
         ${heartbeat ? '' : externalSummary(m)}</div>
@@ -78,7 +78,7 @@
       <div class="bn-monitor-metrics">${heartbeat
         ? '<strong>' + num(m.heartbeat_grace_s) / 60 + ' min</strong><small>Grace period</small>'
         : '<strong>' + pct + '</strong><small>30d checks passed</small><span>' + (m.response_ms == null ? '—' : num(m.response_ms) + ' ms') + ' latest</span>'}</div>
-      <div class="bn-monitor-actions">${heartbeat ? '<button class="bn-btn bn-btn-small" data-heartbeat-token="' + id + '">Replace key</button>' : ''}
+      <div class="bn-monitor-actions">${['owner','admin'].includes(user.workspace_role)?'<button class="bn-btn bn-btn-small" data-monitor-labels="'+id+'">Labels</button>':''}${heartbeat ? '<button class="bn-btn bn-btn-small" data-heartbeat-token="' + id + '">Replace key</button>' : ''}
         ${['http', 'journey'].includes(m.kind) ? '<button class="bn-btn bn-btn-small" data-check-rules="' + id + '" aria-label="Edit checks for ' + tidy(m.name) + '">' + (m.kind === 'journey' ? 'Edit journey' : 'Rules') + '</button>' : ''}
         ${heartbeat ? '' : '<button class="bn-btn bn-btn-small" data-maintenance="' + id + '">Maintenance</button>'}<button class="bn-btn bn-btn-small bn-investigate-button" data-investigate="${id}" aria-label="Investigate ${tidy(m.name)}">Investigate ↗</button>${heartbeat ? '' : '<button class="bn-btn bn-btn-small" data-check="' + id + '" aria-label="Check ' + tidy(m.name) + ' now">Check now</button>'}<button class="bn-icon-btn" data-remove="${id}" aria-label="Remove ${tidy(m.name)}" title="Remove monitor">×</button></div>
     </article>`;
@@ -235,7 +235,7 @@
 
   function filteredMonitors() {
     return getMonitors().filter(m => {
-      const phrase = (String(m.name || '') + ' ' + String(m.url || '')).toLowerCase();
+      const phrase = (String(m.name || '') + ' ' + String(m.url || '')+' '+String(m.client_group||'')+' '+String(m.tags||'')).toLowerCase();
       const wanted = filterState.status;
       const status = statusOf(m);
       return phrase.includes(filterState.query.toLowerCase()) && (wanted === 'all' || status === wanted);
@@ -531,7 +531,7 @@
   function monitorToolbar() {
     return `<div class="bn-toolbar"><div><h3>Monitors<span class="bn-count">${getMonitors().length}</span></h3><p>Websites, APIs, network services, and job heartbeats</p></div>
       <div class="bn-toolbar-actions"><button class="bn-btn bn-btn-quiet" data-bn-refresh>↻ Refresh</button><button class="bn-btn bn-btn-primary" data-bn-new>+ New monitor</button></div></div>
-      <div class="bn-filter-bar"><label class="bn-search-label" for="bn-search">Search monitors<input id="bn-search" type="search" placeholder="Search by name or URL" autocomplete="off" value="${tidy(filterState.query)}"></label>
+      <div class="bn-filter-bar"><label class="bn-search-label" for="bn-search">Search monitors<input id="bn-search" type="search" placeholder="Search name, URL, group or tag" autocomplete="off" value="${tidy(filterState.query)}"></label>
       <label class="bn-filter-label" for="bn-filter">Status<select id="bn-filter"><option value="all" ${filterState.status==='all'?'selected':''}>All statuses</option><option value="up" ${filterState.status==='up'?'selected':''}>Up</option><option value="down" ${filterState.status==='down'?'selected':''}>Down</option><option value="degraded" ${filterState.status==='degraded'?'selected':''}>Degraded</option><option value="pending" ${filterState.status==='pending'?'selected':''}>Pending</option><option value="maintenance" ${filterState.status==='maintenance'?'selected':''}>Maintenance</option></select></label></div>`;
   }
 
@@ -671,3 +671,5 @@
     }
   });
 })();
+
+ document.addEventListener('click',e=>{const b=e.target.closest('[data-monitor-labels]');if(b)editMonitorLabels(Number(b.dataset.monitorLabels));});
