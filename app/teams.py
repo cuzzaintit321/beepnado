@@ -56,6 +56,21 @@ def init(c):
         action TEXT NOT NULL, created_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS team_audit_owner ON team_audit(owner_id,id DESC);
+    CREATE TABLE IF NOT EXISTS team_incident_assignments(
+        incident_id INTEGER PRIMARY KEY REFERENCES incidents(id) ON DELETE CASCADE,
+        member_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS team_incident_notes(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+        actor_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        body TEXT NOT NULL,created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS team_notes_incident ON team_incident_notes(incident_id,id DESC);
+    CREATE TABLE IF NOT EXISTS team_monitor_labels(
+        monitor_id INTEGER PRIMARY KEY REFERENCES monitors(id) ON DELETE CASCADE,
+        client_group TEXT NOT NULL DEFAULT '',tags TEXT NOT NULL DEFAULT ''
+    );
     """)
 
 
@@ -203,3 +218,56 @@ def change_member(c,owner,actor,member,role=None):
     else:
         c.execute('DELETE FROM team_members WHERE owner_id=? AND member_id=?',(owner,member))
     audit(c,owner,actor,('Changed member role to '+role if role else 'Removed member')+' (account '+str(member)+')')
+
+
+class NoteInput(BaseModel):
+    body:str=Field(min_length=1,max_length=2000,pattern=r'\S')
+
+
+class AssignmentInput(BaseModel):
+    member_id:int|None=Field(default=None,gt=0)
+
+
+class LabelsInput(BaseModel):
+    client_group:str=Field(default='',max_length=80)
+    tags:list[str]=Field(default_factory=list,max_length=10)
+
+
+def incident_owned(c,owner,iid):
+    if not c.execute('SELECT 1 FROM incidents i JOIN monitors m ON m.id=i.monitor_id WHERE i.id=? AND m.user_id=?',(iid,owner)).fetchone():
+        raise HTTPException(404,'Incident not found')
+
+
+def incident_collaboration(c,owner,iid):
+    incident_owned(c,owner,iid)
+    assigned=c.execute('SELECT a.member_id,u.email FROM team_incident_assignments a LEFT JOIN users u ON u.id=a.member_id WHERE a.incident_id=?',(iid,)).fetchone()
+    choices=[dict(r) for r in c.execute('SELECT id,email FROM users WHERE id=? OR id IN (SELECT member_id FROM team_members WHERE owner_id=?) ORDER BY id',(owner,owner))
+             if role_for(c,owner,r['id']) in ('owner','admin','operator')]
+    return {'assignee':dict(assigned) if assigned and assigned['member_id'] and role_for(c,owner,assigned['member_id']) in ('owner','admin','operator') else None,
+            'choices':choices,'notes':[dict(r) for r in c.execute('SELECT n.id,n.body,n.created_at,u.email AS actor FROM team_incident_notes n LEFT JOIN users u ON u.id=n.actor_id WHERE n.incident_id=? ORDER BY n.id DESC LIMIT 100',(iid,))]}
+
+
+def assign(c,owner,actor,iid,member):
+    incident_owned(c,owner,iid)
+    if member is not None and role_for(c,owner,member) not in ('owner','admin','operator'):
+        raise HTTPException(422,'Select an active operator, admin or owner')
+    c.execute('INSERT INTO team_incident_assignments VALUES(?,?) ON CONFLICT(incident_id) DO UPDATE SET member_id=excluded.member_id',(iid,member))
+    audit(c,owner,actor,'Changed assignment for incident '+str(iid))
+
+
+def note(c,owner,actor,iid,body):
+    incident_owned(c,owner,iid)
+    if c.execute('SELECT COUNT(*) FROM team_incident_notes WHERE incident_id=?',(iid,)).fetchone()[0]>=500:
+        raise HTTPException(403,'Incident note limit reached')
+    c.execute('INSERT INTO team_incident_notes(incident_id,actor_id,body,created_at) VALUES(?,?,?,?)',(iid,actor,body.strip(),int(time.time())))
+    audit(c,owner,actor,'Added note to incident '+str(iid))
+
+
+def labels(c,owner,actor,mid,body):
+    if not c.execute('SELECT 1 FROM monitors WHERE id=? AND user_id=?',(mid,owner)).fetchone():
+        raise HTTPException(404,'Monitor not found')
+    tags=list(dict.fromkeys(x.strip() for x in body.tags if x.strip()))
+    if any(len(x)>40 or ',' in x or '\n' in x or '\r' in x for x in tags):
+        raise HTTPException(422,'Tags must be at most 40 characters and contain no commas or line breaks')
+    c.execute('INSERT INTO team_monitor_labels VALUES(?,?,?) ON CONFLICT(monitor_id) DO UPDATE SET client_group=excluded.client_group,tags=excluded.tags',(mid,body.client_group.strip(),','.join(tags)))
+    audit(c,owner,actor,'Updated labels for monitor '+str(mid))
