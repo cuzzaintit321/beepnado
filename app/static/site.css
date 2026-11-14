@@ -42,3 +42,5 @@ body{background:var(--paper)}
 @media(max-width:740px){.symbol-storm{width:33px!important;height:33px!important;border-radius:10px;padding:5px}.hero{padding-top:58px}.hero h1{font-size:clamp(42px,11vw,55px);letter-spacing:-2.4px}.nav{height:75px}.visual-outer{transform:rotate(-1deg)}.floating-chip{right:0;font-size:11px}.workspace-side .symbol-storm{width:34px!important;height:34px!important}.hero:before{width:460px;height:460px;right:-230px}}
 
 .pricing-grid.bn-four-plans{grid-template-columns:repeat(auto-fit,minmax(min(100%,240px),1fr))}
+
+.bn-browser-shot{display:block;width:100%;max-width:960px;height:auto;border-radius:8px;margin:12px 0;border:1px solid #354354}
